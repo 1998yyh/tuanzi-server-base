@@ -3,6 +3,7 @@ import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagg
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 
 interface RequestWithUser {
@@ -41,12 +42,10 @@ export class AuthController {
   }
 
   @Post('refresh')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
   @ApiOperation({ summary: '刷新令牌' })
   @ApiResponse({ status: 200, description: '刷新成功' })
-  @ApiResponse({ status: 401, description: '未授权' })
-  async refresh(@Request() req: RequestWithUser) {
-    return this.authService.refresh(req.user.userId);
+  @ApiResponse({ status: 401, description: '无效的刷新令牌' })
+  async refresh(@Body() refreshTokenDto: RefreshTokenDto) {
+    return this.authService.refreshByToken(refreshTokenDto.refreshToken);
   }
 }

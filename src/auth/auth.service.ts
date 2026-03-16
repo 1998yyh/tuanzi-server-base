@@ -52,13 +52,26 @@ export class AuthService {
     return result;
   }
 
-  async refresh(userId: string) {
-    const user = await this.usersService.findById(userId);
-    if (!user) {
-      throw new UnauthorizedException('用户不存在');
-    }
+  /**
+   * 使用 refresh token 刷新访问令牌
+   */
+  async refreshByToken(refreshToken: string) {
+    try {
+      // 验证 refresh token
+      const payload = this.jwtService.verify(refreshToken);
+      const userId = payload.sub;
 
-    return this.generateTokens(user.id);
+      // 检查用户是否存在
+      const user = await this.usersService.findById(userId);
+      if (!user) {
+        throw new UnauthorizedException('用户不存在');
+      }
+
+      // 生成新的 tokens
+      return this.generateTokens(userId);
+    } catch (error) {
+      throw new UnauthorizedException('无效的刷新令牌');
+    }
   }
 
   private generateTokens(userId: string) {
