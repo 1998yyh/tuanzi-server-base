@@ -4,10 +4,11 @@
 
 ## 技术栈
 
-- **框架**: NestJS 10 + TypeScript
+- **框架**: NestJS 11 + TypeScript 5.8
 - **数据库**: MySQL 8.0 + TypeORM
 - **认证**: JWT + Passport
 - **文档**: Swagger
+- **规范**: ESLint 9 (flat config) + Prettier + husky/lint-staged + commitlint
 - **包管理**: pnpm
 
 ## 快速开始
@@ -40,6 +41,19 @@ pnpm start:dev
 服务启动后：
 - API 地址: http://localhost:3000/api
 - Swagger 文档: http://localhost:3000/api/docs
+
+## 常用命令
+
+```bash
+pnpm lint            # ESLint 检查并自动修复
+pnpm format          # Prettier 全量格式化
+pnpm typecheck       # tsc --noEmit 严格类型检查
+pnpm test            # 运行全部 Jest 测试
+pnpm test:cov        # 测试覆盖率
+```
+
+> 提交代码时会自动触发 pre-commit 钩子（lint-staged: eslint --fix + prettier）
+> 以及 commit-msg 钩子（commitlint 校验 conventional commits 格式，如 `feat: xxx`）。
 
 ## API 接口
 
