@@ -23,17 +23,15 @@ export class AuthService {
 
   async login(loginDto: LoginDto) {
     // 支持邮箱或用户名登录
-    const user = await this.usersService.findByEmail(loginDto.login) ||
-                 await this.usersService.findByUsername(loginDto.login);
+    const user =
+      (await this.usersService.findByEmail(loginDto.login)) ||
+      (await this.usersService.findByUsername(loginDto.login));
 
     if (!user) {
       throw new UnauthorizedException('用户不存在');
     }
 
-    const isValid = await this.usersService.validatePassword(
-      loginDto.password,
-      user.password,
-    );
+    const isValid = await this.usersService.validatePassword(loginDto.password, user.password);
 
     if (!isValid) {
       throw new UnauthorizedException('密码错误');
@@ -69,7 +67,7 @@ export class AuthService {
 
       // 生成新的 tokens
       return this.generateTokens(userId);
-    } catch (error) {
+    } catch {
       throw new UnauthorizedException('无效的刷新令牌');
     }
   }

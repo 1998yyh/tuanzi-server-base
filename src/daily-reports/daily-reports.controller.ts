@@ -10,14 +10,10 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import {
-  ApiTags,
-  ApiOperation,
-  ApiResponse,
-  ApiBearerAuth,
-} from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { DailyReportsService } from './daily-reports.service';
 import { CreateDailyReportDto, QueryDailyReportDto } from './dto/daily-report.dto';
+import { DailyReportType } from './daily-reports.entity';
 import { DailyReport } from './daily-reports.entity';
 
 @ApiTags('日报')
@@ -45,7 +41,7 @@ export class DailyReportsController {
   @ApiOperation({ summary: '获取指定类型的日期列表', description: '返回该类型所有日报日期' })
   @ApiResponse({ status: 200, description: '获取成功', type: [String] })
   async getDates(@Param('type') type: string): Promise<string[]> {
-    return this.dailyReportsService.getDatesByType(type as any);
+    return this.dailyReportsService.getDatesByType(type as DailyReportType);
   }
 
   @Get('latest/:type')
@@ -53,7 +49,7 @@ export class DailyReportsController {
   @ApiResponse({ status: 200, description: '获取成功', type: DailyReport })
   @ApiResponse({ status: 404, description: '未找到' })
   async getLatest(@Param('type') type: string): Promise<DailyReport | null> {
-    return this.dailyReportsService.getLatestByType(type as any);
+    return this.dailyReportsService.getLatestByType(type as DailyReportType);
   }
 
   @Get(':id')

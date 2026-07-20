@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between, MoreThanOrEqual, LessThanOrEqual } from 'typeorm';
+import { Repository } from 'typeorm';
 import { DailyReport, DailyReportType } from './daily-reports.entity';
 import { CreateDailyReportDto, QueryDailyReportDto } from './dto/daily-report.dto';
 
@@ -18,7 +18,7 @@ export class DailyReportsService {
 
   async findAll(query: QueryDailyReportDto) {
     const { type, date, page = 1, limit = 10 } = query;
-    
+
     const qb = this.dailyReportRepository.createQueryBuilder('report');
 
     if (type) {
