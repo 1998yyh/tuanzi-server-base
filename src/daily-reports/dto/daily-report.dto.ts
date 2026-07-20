@@ -1,5 +1,13 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEnum, IsNotEmpty, IsDateString, IsString, IsOptional, IsInt, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsNotEmpty,
+  IsDateString,
+  IsString,
+  IsOptional,
+  IsInt,
+  Min,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 import { DailyReportType } from '../daily-reports.entity';
 

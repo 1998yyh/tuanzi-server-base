@@ -176,7 +176,9 @@ describe('AuthService', () => {
       jwtService.verify.mockReturnValue({ sub: 'test-uuid' });
       usersService.findById.mockResolvedValue(null);
 
-      await expect(service.refreshByToken('validRefreshToken')).rejects.toThrow(UnauthorizedException);
+      await expect(service.refreshByToken('validRefreshToken')).rejects.toThrow(
+        UnauthorizedException,
+      );
     });
   });
 });

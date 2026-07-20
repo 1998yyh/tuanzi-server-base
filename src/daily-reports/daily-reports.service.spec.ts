@@ -179,11 +179,7 @@ describe('DailyReportsService', () => {
 
   describe('getDatesByType', () => {
     it('应该返回指定类型的所有日期列表', async () => {
-      const reports = [
-        { date: '2026-03-16' },
-        { date: '2026-03-15' },
-        { date: '2026-03-14' },
-      ];
+      const reports = [{ date: '2026-03-16' }, { date: '2026-03-15' }, { date: '2026-03-14' }];
 
       repository.find.mockResolvedValue(reports as any);
 
