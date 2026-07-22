@@ -27,7 +27,6 @@ describe('AuthController', () => {
     const mockService = {
       register: jest.fn(),
       login: jest.fn(),
-      getProfile: jest.fn(),
       refreshByToken: jest.fn(),
     };
 
@@ -79,15 +78,11 @@ describe('AuthController', () => {
   });
 
   describe('getProfile', () => {
-    it('应该返回当前用户信息', async () => {
-      const req = { user: { userId: 'test-uuid' } };
+    it('应该直接返回 guard 注入的当前用户（不含密码）', () => {
+      const result = controller.getProfile(mockUser);
 
-      service.getProfile.mockResolvedValue(mockUser);
-
-      const result = await controller.getProfile(req);
-
-      expect(service.getProfile).toHaveBeenCalledWith('test-uuid');
       expect(result).toEqual(mockUser);
+      expect(result).not.toHaveProperty('password');
     });
   });
 

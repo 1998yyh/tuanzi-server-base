@@ -44,16 +44,20 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 
 ```
 请求 → global ValidationPipe(严格白名单) → JwtAuthGuard(受保护路由)
-     → JwtStrategy.validate: 验签 → UsersService.findById → req.user = { userId }
-     → Controller: @CurrentUser() 取 userId → Service → TypeORM Repository
+     → JwtStrategy.validate: 验签(仅接受 type=access) → UsersService.findById → req.user = 剔除密码的完整 user
+     → Controller: @CurrentUser() 直接取 user（无需再查库） → Service → TypeORM Repository
 ```
 
 关键事实：
 
-- access token 2h / refresh token 7d，两者用**同一个 `JWT_SECRET`** 签发；刷新接口（`POST /api/auth/refresh`）用 `jwtService.verify` 验证 refresh token 后重新签发一对 token（`auth.service.ts`）。
-- `JwtStrategy.validate` 返回 `{ userId }` 而非完整 user 实体——controller 里只能拿到 `userId`，要用户数据需再查库。
+- access token / refresh token 的 payload 都带 `type` 标记（`TokenType` 枚举，`auth.service.ts`）：refresh 接口只接受 `type=refresh`，受保护路由只接受 `type=access`，两种 token 不可混用。两者仍用**同一个 `JWT_SECRET`** 签发；刷新接口（`POST /api/auth/refresh`）用 `jwtService.verify` 验证后重新签发一对 token。
+- 过期时间走环境变量 `JWT_EXPIRES_IN` / `JWT_REFRESH_EXPIRES_IN`（单位：秒，默认 7200 / 604800）。注意：env 读出来是字符串，代码里必须 `Number()` 转换，否则 jsonwebtoken 会把 `"7200"` 当成 7200 毫秒。
+- `JWT_SECRET` 为必填——`auth.module.ts` 与 `jwt.strategy.ts` 在缺失时会直接抛错（fail fast），不再有默认值兜底。
+- `JwtStrategy.validate` 返回**剔除密码的完整 user 实体**（查库确认用户存在后一次返回），controller 用 `@CurrentUser()` 直接获取，不要二次查库。
 - `synchronize: NODE_ENV !== 'production'`：开发环境改实体即自动改表，**不要写 migration**；生产环境绝不能开。
 - 实体通过 `**/*.entity{.ts,.js}` glob 自动发现，新实体放哪都会被加载。
+- 日报模块：只读接口（GET）公开，写接口（POST/PATCH/DELETE）必须 `@UseGuards(JwtAuthGuard)`。
+- Swagger 仅非生产环境注册；CORS 仅在配置 `CORS_ORIGINS` 时开启 credentials（`origin: '*'` 与 credentials 互斥）。
 
 ## 编码规范
 
@@ -85,7 +89,7 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 
 - 不要在生产配置中开启 TypeORM `synchronize`。
 - 不要在 controller 里直接注入 Repository——数据访问一律经过 Service。
-- 不要把 `password` 字段泄露到 API 响应（参照 `auth.service.ts#getProfile` 的解构剔除写法）。
+- 不要把 `password` 字段泄露到 API 响应（参照 `jwt.strategy.ts#validate` 的解构剔除写法）。
 - 不要提交 `.env` / `.env.local`（仅 `.env.example` 入库）。
 
 ## 测试要求

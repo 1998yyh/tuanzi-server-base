@@ -1,7 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { AuthService } from './auth.service';
+import { AuthService, TokenType } from './auth.service';
 import { UsersService } from '../users/users.service';
 import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 import { UnauthorizedException } from '@nestjs/common';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -20,6 +21,11 @@ describe('AuthService', () => {
     updatedAt: new Date(),
   };
 
+  const mockConfig: Record<string, string> = {
+    JWT_EXPIRES_IN: '7200',
+    JWT_REFRESH_EXPIRES_IN: '604800',
+  };
+
   beforeEach(async () => {
     const mockUsersService = {
       create: jest.fn(),
@@ -34,11 +40,16 @@ describe('AuthService', () => {
       verify: jest.fn(),
     };
 
+    const mockConfigService = {
+      get: jest.fn((key: string, defaultValue?: unknown) => mockConfig[key] ?? defaultValue),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
         { provide: UsersService, useValue: mockUsersService },
         { provide: JwtService, useValue: mockJwtService },
+        { provide: ConfigService, useValue: mockConfigService },
       ],
     }).compile();
 
@@ -107,49 +118,47 @@ describe('AuthService', () => {
       expect(result.accessToken).toBe('accessToken');
     });
 
-    it('用户不存在时应抛出 UnauthorizedException', async () => {
+    it('用户不存在时应抛出统一的认证错误（防止用户枚举）', async () => {
       usersService.findByEmail.mockResolvedValue(null);
       usersService.findByUsername.mockResolvedValue(null);
 
       await expect(service.login(loginDto)).rejects.toThrow(UnauthorizedException);
-      await expect(service.login(loginDto)).rejects.toThrow('用户不存在');
+      await expect(service.login(loginDto)).rejects.toThrow('用户名或密码错误');
     });
 
-    it('密码错误时应抛出 UnauthorizedException', async () => {
+    it('密码错误时应抛出统一的认证错误（防止用户枚举）', async () => {
       usersService.findByEmail.mockResolvedValue(mockUser);
       usersService.validatePassword.mockResolvedValue(false);
 
       await expect(service.login(loginDto)).rejects.toThrow(UnauthorizedException);
-      await expect(service.login(loginDto)).rejects.toThrow('密码错误');
+      await expect(service.login(loginDto)).rejects.toThrow('用户名或密码错误');
     });
   });
 
-  describe('getProfile', () => {
-    it('应该返回用户信息（不含密码）', async () => {
-      usersService.findById.mockResolvedValue(mockUser);
+  describe('generateTokens（通过 login 间接验证）', () => {
+    it('access token 与 refresh token 应携带不同的 type 标记', async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser);
+      usersService.validatePassword.mockResolvedValue(true);
+      jwtService.sign.mockReturnValue('token');
 
-      const result = await service.getProfile('test-uuid');
+      await service.login({ login: 'test@test.com', password: 'password123' });
 
-      expect(result).toEqual({
-        id: mockUser.id,
-        email: mockUser.email,
-        username: mockUser.username,
-        createdAt: mockUser.createdAt,
-        updatedAt: mockUser.updatedAt,
-      });
-      expect(result).not.toHaveProperty('password');
-    });
-
-    it('用户不存在时应抛出 UnauthorizedException', async () => {
-      usersService.findById.mockResolvedValue(null);
-
-      await expect(service.getProfile('nonexistent')).rejects.toThrow(UnauthorizedException);
+      expect(jwtService.sign).toHaveBeenNthCalledWith(
+        1,
+        { sub: mockUser.id, type: TokenType.ACCESS },
+        { expiresIn: 7200 },
+      );
+      expect(jwtService.sign).toHaveBeenNthCalledWith(
+        2,
+        { sub: mockUser.id, type: TokenType.REFRESH },
+        { expiresIn: 604800 },
+      );
     });
   });
 
   describe('refreshByToken', () => {
     it('应该用有效的 refresh token 刷新 tokens', async () => {
-      jwtService.verify.mockReturnValue({ sub: 'test-uuid' });
+      jwtService.verify.mockReturnValue({ sub: 'test-uuid', type: TokenType.REFRESH });
       usersService.findById.mockResolvedValue(mockUser);
       jwtService.sign.mockReturnValueOnce('newAccessToken').mockReturnValueOnce('newRefreshToken');
 
@@ -163,7 +172,21 @@ describe('AuthService', () => {
       });
     });
 
-    it('无效的 refresh token 应抛出 UnauthorizedException', async () => {
+    it('access token 不能当作 refresh token 使用', async () => {
+      jwtService.verify.mockReturnValue({ sub: 'test-uuid', type: TokenType.ACCESS });
+
+      await expect(service.refreshByToken('accessToken')).rejects.toThrow(UnauthorizedException);
+      await expect(service.refreshByToken('accessToken')).rejects.toThrow('无效的刷新令牌');
+      expect(usersService.findById).not.toHaveBeenCalled();
+    });
+
+    it('缺少 type 标记的旧格式 token 应被拒绝', async () => {
+      jwtService.verify.mockReturnValue({ sub: 'test-uuid' });
+
+      await expect(service.refreshByToken('legacyToken')).rejects.toThrow('无效的刷新令牌');
+    });
+
+    it('签名无效的 refresh token 应抛出 UnauthorizedException', async () => {
       jwtService.verify.mockImplementation(() => {
         throw new Error('Invalid token');
       });
@@ -173,7 +196,7 @@ describe('AuthService', () => {
     });
 
     it('用户不存在时应抛出 UnauthorizedException', async () => {
-      jwtService.verify.mockReturnValue({ sub: 'test-uuid' });
+      jwtService.verify.mockReturnValue({ sub: 'test-uuid', type: TokenType.REFRESH });
       usersService.findById.mockResolvedValue(null);
 
       await expect(service.refreshByToken('validRefreshToken')).rejects.toThrow(

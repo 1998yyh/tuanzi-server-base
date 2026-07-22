@@ -1,8 +1,12 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { DailyReport, DailyReportType } from './daily-reports.entity';
-import { CreateDailyReportDto, QueryDailyReportDto } from './dto/daily-report.dto';
+import {
+  CreateDailyReportDto,
+  QueryDailyReportDto,
+  UpdateDailyReportDto,
+} from './dto/daily-report.dto';
 
 @Injectable()
 export class DailyReportsService {
@@ -12,6 +16,12 @@ export class DailyReportsService {
   ) {}
 
   async create(createDto: CreateDailyReportDto): Promise<DailyReport> {
+    // type + date 有唯一索引，先查重以返回明确的 409 而非数据库 500
+    const existing = await this.findByTypeAndDate(createDto.type, createDto.date);
+    if (existing) {
+      throw new ConflictException(`${createDto.date} 该类型的日报已存在`);
+    }
+
     const report = this.dailyReportRepository.create(createDto);
     return this.dailyReportRepository.save(report);
   }
@@ -59,7 +69,7 @@ export class DailyReportsService {
     });
   }
 
-  async update(id: string, updateDto: Partial<CreateDailyReportDto>): Promise<DailyReport> {
+  async update(id: string, updateDto: UpdateDailyReportDto): Promise<DailyReport> {
     const report = await this.findOne(id);
     Object.assign(report, updateDto);
     return this.dailyReportRepository.save(report);

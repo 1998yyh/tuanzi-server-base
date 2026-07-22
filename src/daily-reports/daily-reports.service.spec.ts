@@ -3,7 +3,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { DailyReportsService } from './daily-reports.service';
 import { DailyReport, DailyReportType } from './daily-reports.entity';
-import { NotFoundException } from '@nestjs/common';
+import { NotFoundException, ConflictException } from '@nestjs/common';
 
 describe('DailyReportsService', () => {
   let service: DailyReportsService;
@@ -44,22 +44,34 @@ describe('DailyReportsService', () => {
   });
 
   describe('create', () => {
-    it('应该成功创建日报', async () => {
-      const createDto = {
-        type: DailyReportType.AI,
-        title: 'AI情报早报 | 2026-03-16',
-        date: '2026-03-16',
-        content: '# 测试内容',
-      };
+    const createDto = {
+      type: DailyReportType.AI,
+      title: 'AI情报早报 | 2026-03-16',
+      date: '2026-03-16',
+      content: '# 测试内容',
+    };
 
+    it('应该成功创建日报', async () => {
+      repository.findOne.mockResolvedValue(null);
       repository.create.mockReturnValue(mockReport);
       repository.save.mockResolvedValue(mockReport);
 
       const result = await service.create(createDto);
 
+      expect(repository.findOne).toHaveBeenCalledWith({
+        where: { type: createDto.type, date: createDto.date },
+      });
       expect(repository.create).toHaveBeenCalledWith(createDto);
       expect(repository.save).toHaveBeenCalledWith(mockReport);
       expect(result).toEqual(mockReport);
+    });
+
+    it('同类型同日期的日报已存在时应抛出 ConflictException', async () => {
+      repository.findOne.mockResolvedValue(mockReport);
+
+      await expect(service.create(createDto)).rejects.toThrow(ConflictException);
+      await expect(service.create(createDto)).rejects.toThrow('2026-03-16 该类型的日报已存在');
+      expect(repository.save).not.toHaveBeenCalled();
     });
   });
 

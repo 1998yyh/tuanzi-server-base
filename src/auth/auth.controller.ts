@@ -1,14 +1,12 @@
-import { Controller, Post, Get, Body, UseGuards, Request } from '@nestjs/common';
+import { Controller, Post, Get, Body, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
-
-interface RequestWithUser {
-  user: { userId: string };
-}
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { User } from '../users/users.entity';
 
 @ApiTags('认证')
 @Controller('auth')
@@ -24,9 +22,10 @@ export class AuthController {
   }
 
   @Post('login')
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: '用户登录' })
   @ApiResponse({ status: 200, description: '登录成功' })
-  @ApiResponse({ status: 401, description: '认证失败' })
+  @ApiResponse({ status: 401, description: '用户名或密码错误' })
   async login(@Body() loginDto: LoginDto) {
     return this.authService.login(loginDto);
   }
@@ -37,11 +36,12 @@ export class AuthController {
   @ApiOperation({ summary: '获取当前用户信息' })
   @ApiResponse({ status: 200, description: '成功' })
   @ApiResponse({ status: 401, description: '未授权' })
-  async getProfile(@Request() req: RequestWithUser) {
-    return this.authService.getProfile(req.user.userId);
+  getProfile(@CurrentUser() user: Omit<User, 'password'>) {
+    return user;
   }
 
   @Post('refresh')
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: '刷新令牌' })
   @ApiResponse({ status: 200, description: '刷新成功' })
   @ApiResponse({ status: 401, description: '无效的刷新令牌' })

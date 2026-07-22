@@ -86,9 +86,9 @@ describe('DailyReportsController', () => {
       const dates = ['2026-03-16', '2026-03-15'];
       service.getDatesByType.mockResolvedValue(dates);
 
-      const result = await controller.getDates('ai');
+      const result = await controller.getDates(DailyReportType.AI);
 
-      expect(service.getDatesByType).toHaveBeenCalledWith('ai');
+      expect(service.getDatesByType).toHaveBeenCalledWith(DailyReportType.AI);
       expect(result).toEqual(dates);
     });
   });
@@ -97,16 +97,16 @@ describe('DailyReportsController', () => {
     it('应该返回指定类型的最新日报', async () => {
       service.getLatestByType.mockResolvedValue(mockReport);
 
-      const result = await controller.getLatest('ai');
+      const result = await controller.getLatest(DailyReportType.AI);
 
-      expect(service.getLatestByType).toHaveBeenCalledWith('ai');
+      expect(service.getLatestByType).toHaveBeenCalledWith(DailyReportType.AI);
       expect(result).toEqual(mockReport);
     });
 
     it('不存在时返回 null', async () => {
       service.getLatestByType.mockResolvedValue(null);
 
-      const result = await controller.getLatest('stock');
+      const result = await controller.getLatest(DailyReportType.STOCK);
 
       expect(result).toBeNull();
     });
@@ -120,6 +120,20 @@ describe('DailyReportsController', () => {
 
       expect(service.findOne).toHaveBeenCalledWith('test-uuid');
       expect(result).toEqual(mockReport);
+    });
+  });
+
+  describe('update', () => {
+    it('应该调用 service.update 并返回更新后的日报', async () => {
+      const updateDto = { title: '新标题' };
+      const updatedReport = { ...mockReport, title: '新标题' };
+
+      service.update.mockResolvedValue(updatedReport);
+
+      const result = await controller.update('test-uuid', updateDto);
+
+      expect(service.update).toHaveBeenCalledWith('test-uuid', updateDto);
+      expect(result).toEqual(updatedReport);
     });
   });
 

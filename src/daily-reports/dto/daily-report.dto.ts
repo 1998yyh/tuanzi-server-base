@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, PartialType } from '@nestjs/swagger';
 import {
   IsEnum,
   IsNotEmpty,
@@ -7,6 +7,7 @@ import {
   IsOptional,
   IsInt,
   Min,
+  Max,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { DailyReportType } from '../daily-reports.entity';
@@ -51,10 +52,13 @@ export class QueryDailyReportDto {
   @IsOptional()
   page?: number = 1;
 
-  @ApiProperty({ required: false, default: 10, description: '每页数量' })
+  @ApiProperty({ required: false, default: 10, maximum: 100, description: '每页数量（最大 100）' })
   @IsInt()
   @Min(1)
+  @Max(100)
   @Type(() => Number)
   @IsOptional()
   limit?: number = 10;
 }
+
+export class UpdateDailyReportDto extends PartialType(CreateDailyReportDto) {}
