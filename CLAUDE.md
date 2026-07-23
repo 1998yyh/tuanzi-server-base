@@ -15,11 +15,12 @@ src/
   auth/           # 注册/登录/刷新令牌 + JwtStrategy（依赖 UsersModule）
   users/          # User 实体 + UsersService（无 controller，不暴露路由）
   daily-reports/  # 日报 CRUD，公开只读接口，无需鉴权
+  llm/            # 基础 LLM 服务层（LangChain ChatAnthropic），无 controller，不暴露路由
   uploads/        # ⚠️ 孤儿模块：MulterModule 磁盘存储配置，未在 app.module 注册
   common/         # guards/ decorators/ filters/（跨模块共享件）
 ```
 
-- 功能模块在 `src/app.module.ts` 注册，当前仅：`AuthModule`、`UsersModule`、`DailyReportsModule`。新增模块必须手动加进 `imports`。
+- 功能模块在 `src/app.module.ts` 注册，当前仅：`AuthModule`、`UsersModule`、`DailyReportsModule`、`LlmModule`。新增模块必须手动加进 `imports`。
 - `uploads/` 目录（仓库根）存封面图，`main.ts` 静态服务在 `/uploads/` 前缀。文件上传端点随 novels 模块一起被删除；如需恢复上传，把 `UploadsModule` import 进使用方模块并配 `FileInterceptor`。
 
 ## 可执行命令
@@ -69,7 +70,8 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 - **Service**: 分页查询用 QueryBuilder，返回固定形状 `{ items, total, page, limit, totalPages }`；找不到抛 `NotFoundException`（中文消息，如 `` `日报 #${id} 不存在` ``）；业务冲突抛 `ConflictException`。
 - **错误消息与 API 文案一律中文**。
 - **提交规范**：husky 管理 git hooks——`pre-commit` 跑 lint-staged（eslint --fix + prettier），`commit-msg` 用 commitlint 强制 conventional commits（`feat:`/`fix:`/`chore:`...），不规范的提交信息会被直接拦截。
-- 测试用 `Test.createTestingModule` + `useValue` mock 依赖（见 `auth.service.spec.ts`），测试描述用中文。
+- **分支规范**：格式 `<type>/<kebab-case-描述>`，type 与 commitlint 类型集合对齐（`feat`/`fix`/`chore`/`refactor`/`docs`/`test`），另加 `hotfix` 用于线上紧急修复。描述用小写英文 2~4 个词，说清"做什么"（如 `feat/llm-report-generation`、`fix/jwt-refresh-expiry`）；有 issue 编号可加在描述前（`feat/123-llm-report`）。长期分支只保留 `main`，功能分支合并后即删。
+- 测试用 `Test.createTestingModule` + `useValue` mock 依赖（见 `test/auth/auth.service.spec.ts`），测试描述用中文。
 
 ## 三层边界模型
 
@@ -94,7 +96,7 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 
 ## 测试要求
 
-- Jest 29，`rootDir: src`，测试为与源码同目录的 `*.spec.ts`；路径别名 `src/*` 已在 `jest.config.js` 映射。
+- Jest 29，测试统一放 `test/` 目录、镜像 `src/` 模块结构（如 `test/auth/auth.service.spec.ts`），`roots` 限定为 `test/`；被测代码一律用 `src/` 别名导入（已在 `jest.config.js` 的 `moduleNameMapper` 映射），不写相对路径。
 - 单元测试 mock 所有外部依赖（Service 的 Repository、被注入的其他 Service），不连真实数据库；目前无 e2e 测试。
 - 覆盖率收集排除 `*.module.ts` / `*.dto.ts` / `*.entity.ts` / `main.ts`——业务逻辑应放在 Service 层才可被覆盖率度量。
 
@@ -104,6 +106,6 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 - 新增功能模块时同步更新本文件「项目结构」与 `app.module.ts` 注册清单。
 
 ---
-**版本**: v2.0
-**最后更新**: 2026-07-19
+**版本**: v2.1
+**最后更新**: 2026-07-23
 **维护者**: 团子项目组
