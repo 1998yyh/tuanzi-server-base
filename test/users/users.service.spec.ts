@@ -3,8 +3,8 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConflictException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
-import { UsersService } from './users.service';
-import { User } from './users.entity';
+import { UsersService } from 'src/users/users.service';
+import { User } from 'src/users/users.entity';
 
 jest.mock('bcrypt');
 

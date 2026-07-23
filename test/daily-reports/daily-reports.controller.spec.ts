@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { DailyReportsController } from './daily-reports.controller';
-import { DailyReportsService } from './daily-reports.service';
-import { DailyReport, DailyReportType } from './daily-reports.entity';
+import { DailyReportsController } from 'src/daily-reports/daily-reports.controller';
+import { DailyReportsService } from 'src/daily-reports/daily-reports.service';
+import { DailyReport, DailyReportType } from 'src/daily-reports/daily-reports.entity';
 
 describe('DailyReportsController', () => {
   let controller: DailyReportsController;

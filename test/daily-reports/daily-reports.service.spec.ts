@@ -1,8 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { DailyReportsService } from './daily-reports.service';
-import { DailyReport, DailyReportType } from './daily-reports.entity';
+import { DailyReportsService } from 'src/daily-reports/daily-reports.service';
+import { DailyReport, DailyReportType } from 'src/daily-reports/daily-reports.entity';
 import { NotFoundException, ConflictException } from '@nestjs/common';
 
 describe('DailyReportsService', () => {
