@@ -22,8 +22,10 @@ LangGraph 的理由：已有 `@langchain/anthropic` 底座，LangGraph 的 Check
 
 **新增依赖**：
 ```bash
-pnpm add @langchain/langgraph @modelcontextprotocol/sdk
+pnpm add @langchain/langgraph @modelcontextprotocol/sdk @langchain/mcp-adapters
 ```
+
+`@langchain/mcp-adapters` 负责将 MCP 工具的 JSON Schema 正确转换为 LangChain 所需的 Zod Schema，不引入它直接 `as ZodSchema` 强转会在运行时崩溃。
 
 ---
 
@@ -67,10 +69,26 @@ src/agents/
 ### 3.1 AgentConfig
 
 ```typescript
+// provider 枚举：扩展时在此添加，switch 分支同步更新
+export enum ProviderType {
+  ANTHROPIC = 'anthropic',
+  OPENAI = 'openai',
+  DEEPSEEK = 'deepseek',
+}
+
 @Entity('agent_configs')
 export class AgentConfig {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // ── 用户归属（多用户隔离核心字段）──────────────────────────
+  @ManyToOne(() => User, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'user_id' })
+  user: User;
+
+  @Column({ name: 'user_id' })
+  userId: string;
+  // ─────────────────────────────────────────────────────────
 
   @Column()
   name: string;
@@ -78,8 +96,8 @@ export class AgentConfig {
   @Column({ nullable: true })
   description: string;
 
-  @Column()
-  provider: string; // 'anthropic' | 'openai' | 'deepseek'
+  @Column({ type: 'enum', enum: ProviderType })
+  provider: ProviderType;
 
   @Column()
   model: string;
@@ -118,6 +136,8 @@ export class AgentConfig {
 export interface McpServerConfig {
   name: string;
   transport: 'stdio' | 'sse';
+  // ⚠️ stdio 模式直接在服务端执行子进程，仅允许管理员角色配置
+  // 普通用户只能使用 sse 模式连接已部署的 MCP Server
   command?: string; // stdio 模式：如 "npx @modelcontextprotocol/server-filesystem /tmp"
   url?: string;     // sse 模式：服务端 URL
 }
@@ -126,6 +146,11 @@ export interface McpServerConfig {
 ### 3.2 Conversation
 
 ```typescript
+export enum ConversationStatus {
+  ACTIVE = 'active',
+  ARCHIVED = 'archived',
+}
+
 @Entity('conversations')
 export class Conversation {
   @PrimaryGeneratedColumn('uuid')
@@ -141,8 +166,8 @@ export class Conversation {
   @Column({ nullable: true })
   title: string; // 默认取首条用户消息前 30 字
 
-  @Column({ type: 'enum', enum: ['active', 'archived'], default: 'active' })
-  status: 'active' | 'archived';
+  @Column({ type: 'enum', enum: ConversationStatus, default: ConversationStatus.ACTIVE })
+  status: ConversationStatus;
 
   @OneToMany(() => Message, (m) => m.conversation)
   messages: Message[];
@@ -158,6 +183,12 @@ export class Conversation {
 ### 3.3 Message
 
 ```typescript
+export enum MessageRole {
+  USER = 'user',
+  ASSISTANT = 'assistant',
+  TOOL = 'tool',
+}
+
 @Entity('messages')
 export class Message {
   @PrimaryGeneratedColumn('uuid')
@@ -170,8 +201,8 @@ export class Message {
   @Column({ name: 'conversation_id' })
   conversationId: string;
 
-  @Column({ type: 'enum', enum: ['user', 'assistant', 'tool'] })
-  role: 'user' | 'assistant' | 'tool';
+  @Column({ type: 'enum', enum: MessageRole })
+  role: MessageRole;
 
   @Column({ type: 'text' })
   content: string;
@@ -215,10 +246,11 @@ export class AgentCheckpoint {
   @Column({ name: 'parent_checkpoint_id', nullable: true })
   parentCheckpointId: string | null;
 
-  @Column({ type: 'text' })
+  // MEDIUMTEXT（16MB）：LangGraph 每步追加一行，多轮 tool loop 后状态 JSON 轻松超出 TEXT 的 65KB 上限
+  @Column({ type: 'mediumtext' })
   checkpoint: string; // 序列化的 LangGraph 图状态 JSON
 
-  @Column({ name: 'checkpoint_metadata', type: 'text', nullable: true })
+  @Column({ name: 'checkpoint_metadata', type: 'mediumtext', nullable: true })
   checkpointMetadata: string | null;
 
   @CreateDateColumn({ name: 'created_at' })
@@ -227,6 +259,16 @@ export class AgentCheckpoint {
 ```
 
 此表由 `TypeORMCheckpointer` 独占读写，业务代码不直接操作。
+
+**⚠️ 表膨胀说明**：LangGraph 采用追加写入模式，每个图节点执行完都会插入一条新记录（类似事件溯源），不会更新已有行。一次5轮 tool loop 的 Agent 执行会写入约6条记录。长期运行后此表是全库增长最快的表，必须有清理策略：
+
+| 触发时机 | 清理范围 | 实现位置 |
+|---------|---------|---------|
+| 会话归档（`status → ARCHIVED`） | 删除该 `thread_id` 的全部 checkpoint 行 | `ConversationsService.archiveConversation()` |
+| 会话删除 | 同上（`onDelete: 'CASCADE'` 无法覆盖，因为 AgentCheckpoint 不与 Conversation 建外键，需手动删） | `ConversationsService.remove()` |
+| 定期维护任务（可选） | 每个 `thread_id` 只保留最新 N 条，清理超出部分 | 独立 cron job |
+
+> 当前版本实现最小集：会话删除时手动清理对应 checkpoint 行，暂不引入 cron job。
 
 ---
 
@@ -259,6 +301,14 @@ START → agent_node → [有 tool_calls 且未超 maxIterations？]
 ### 4.3 AgentExecutorService
 
 ```typescript
+// 本次执行新增的消息数据，用于持久化到 Message 表
+export interface NewMessageData {
+  role: MessageRole;
+  content: string;
+  toolCalls?: ToolCallRecord[] | null;
+  toolCallId?: string | null;
+}
+
 @Injectable()
 export class AgentExecutorService {
   constructor(
@@ -271,16 +321,24 @@ export class AgentExecutorService {
     agentConfig: AgentConfig,
     conversationId: string,
     userMessage: string,
-  ): Promise<NewMessages> {
+  ): Promise<NewMessageData[]> {
     const tools = await this.toolRegistry.getToolsForAgent(agentConfig);
     const graph = this.buildGraph(agentConfig, tools);
+
+    // 记录调用前的消息数，用于提取本轮新增消息
+    // graph.invoke 返回的 messages 包含完整历史（Checkpointer 恢复的旧消息 + 本次新消息）
+    // 直接取 result.messages 会把历史重复写进 Message 表
+    const stateBefore = await graph.getState({ configurable: { thread_id: conversationId } });
+    const previousCount = stateBefore?.values?.messages?.length ?? 0;
 
     const result = await graph.invoke(
       { messages: [new HumanMessage(userMessage)] },
       { configurable: { thread_id: conversationId } },
     );
 
-    return this.extractNewMessages(result.messages);
+    // 只取本轮新增部分（跳过 userMessage 本身，它已由 ConversationsService 单独持久化）
+    const newLangChainMessages = result.messages.slice(previousCount + 1);
+    return newLangChainMessages.map((m) => this.toLangChainMessageData(m));
   }
 
   // 同上，返回 AsyncGenerator<SseEvent> 用于流式
@@ -316,11 +374,17 @@ export class AgentExecutorService {
 
     graph.addNode('tools_node', async (state) => {
       const lastMsg = state.messages.at(-1) as AIMessage;
+      const TOOL_TIMEOUT_MS = 30_000; // 单个工具最长执行时间，超时视为失败让 LLM 决策
       const results = await Promise.all(
         lastMsg.tool_calls.map(async (call) => {
           const tool = tools.find((t) => t.name === call.name);
           const output = tool
-            ? await tool.invoke(call.args).catch((e) => `工具调用失败: ${e.message}`)
+            ? await Promise.race([
+                tool.invoke(call.args),
+                new Promise<string>((_, reject) =>
+                  setTimeout(() => reject(new Error(`工具调用超时（${TOOL_TIMEOUT_MS / 1000}s）`)), TOOL_TIMEOUT_MS),
+                ),
+              ]).catch((e: Error) => `工具调用失败: ${e.message}`)
             : `未找到工具: ${call.name}`;
           return new ToolMessage({ content: String(output), tool_call_id: call.id });
         }),
@@ -401,24 +465,17 @@ export class ToolRegistryService implements OnModuleInit, OnModuleDestroy {
 
   private async loadMcpTools(mcpConfig: McpServerConfig): Promise<StructuredTool[]> {
     const client = await this.connectOrGet(mcpConfig);
-    const { tools } = await client.listTools();
-
-    return tools.map(
-      (t) =>
-        new DynamicStructuredTool({
-          name: t.name,
-          description: t.description,
-          schema: t.inputSchema as ZodSchema,
-          func: async (input) => {
-            const result = await client.callTool({ name: t.name, arguments: input });
-            return JSON.stringify(result.content);
-          },
-        }),
-    );
+    // 必须用 @langchain/mcp-adapters 的 loadMcpTools 做 JSON Schema → Zod 转换
+    // MCP 返回的 inputSchema 是 JSON Schema 对象，不是 Zod 实例
+    // 直接 `as ZodSchema` 强转只骗过 TypeScript，运行时 LangChain 调用 .parse() 必然崩溃
+    const { loadMcpTools } = await import('@langchain/mcp-adapters');
+    return loadMcpTools(client);
   }
 
   private async connectOrGet(config: McpServerConfig): Promise<Client> {
-    if (this.mcpClients.has(config.name)) return this.mcpClients.get(config.name)!;
+    // 以 transport + endpoint 为 key，防止同名但不同 URL/command 的配置复用错误连接
+    const cacheKey = `${config.transport}:${config.url ?? config.command}`;
+    if (this.mcpClients.has(cacheKey)) return this.mcpClients.get(cacheKey)!;
 
     const client = new Client(
       { name: 'tuanzi-agent', version: '1.0.0' },
@@ -431,7 +488,7 @@ export class ToolRegistryService implements OnModuleInit, OnModuleDestroy {
         : new SSEClientTransport(new URL(config.url!));
 
     await client.connect(transport);
-    this.mcpClients.set(config.name, client);
+    this.mcpClients.set(cacheKey, client);
     return client;
   }
 }
@@ -478,7 +535,7 @@ export class ConversationsService {
     return { userMessage: userMsg, agentMessages };
   }
 
-  // 流式版本：直接透传 AgentExecutorService.runStream() 的 AsyncGenerator
+  // 流式版本：透传 SSE 事件同时收集 agent 消息，流结束后持久化到 Message 表
   async *sendMessageStream(
     conversationId: string,
     content: string,
@@ -489,14 +546,64 @@ export class ConversationsService {
     });
 
     await this.messageRepo.save(
-      this.messageRepo.create({ conversationId, role: 'user', content }),
+      this.messageRepo.create({ conversationId, role: MessageRole.USER, content }),
     );
 
-    yield* this.agentExecutor.runStream(
+    // 收集本轮 agent 产生的所有消息，用于流结束后持久化
+    const pendingMessages: Partial<Message>[] = [];
+    let currentContent = '';
+    let currentToolCalls: ToolCallRecord[] = [];
+
+    for await (const event of this.agentExecutor.runStream(
       conversation.agentConfig,
       conversationId,
       content,
-    );
+    )) {
+      yield event; // 先透传给 Controller，保证流不被阻塞
+
+      // 同步追踪消息内容，供后续持久化
+      switch (event.type) {
+        case 'message_start':
+          currentContent = '';
+          currentToolCalls = [];
+          break;
+        case 'text_delta':
+          currentContent += (event.data as { text: string }).text;
+          break;
+        case 'tool_use':
+          currentToolCalls.push({
+            id: (event.data as { id: string }).id,
+            name: (event.data as { name: string }).name,
+            args: (event.data as { args: Record<string, unknown> }).args,
+          });
+          break;
+        case 'tool_result':
+          pendingMessages.push({
+            conversationId,
+            role: MessageRole.TOOL,
+            content: String((event.data as { content: unknown }).content),
+            toolCallId: (event.data as { callId: string }).callId,
+          });
+          break;
+        case 'message_end':
+          if (currentContent || currentToolCalls.length) {
+            pendingMessages.push({
+              conversationId,
+              role: MessageRole.ASSISTANT,
+              content: currentContent,
+              toolCalls: currentToolCalls.length ? currentToolCalls : null,
+            });
+          }
+          break;
+      }
+    }
+
+    // 流结束后统一持久化，保证消息历史完整
+    if (pendingMessages.length) {
+      await this.messageRepo.save(
+        pendingMessages.map((m) => this.messageRepo.create(m)),
+      );
+    }
   }
 }
 ```
@@ -524,6 +631,12 @@ export class ConversationsService {
 | GET | `/api/agents/:id` | 详情（API Key 脱敏） |
 | PATCH | `/api/agents/:id` | 更新配置 |
 | DELETE | `/api/agents/:id` | 软删除（is_active = false） |
+
+**软删除行为约定**：
+
+- `GET /api/agents` 列表默认只返回 `is_active = true` 的记录，软删除的 Agent 不出现在列表中
+- 软删除后，向该 Agent 下的 Conversation 发消息时，`ConversationsService.sendMessage()` 检查 `agentConfig.isActive`，为 `false` 时抛 `GoneException`（410），告知前端 Agent 已停用
+- 当前版本不提供重新激活接口（YAGNI），需要时通过 `PATCH /api/agents/:id` 传 `{ "isActive": true }` 恢复
 
 `POST /api/agents` 请求体：
 ```json
@@ -603,10 +716,10 @@ event: text_delta
 data: {"text":"我先查一下"}
 
 event: tool_use
-data: {"name":"web_search","args":{"query":"AAPL stock price"}}
+data: {"id":"call_xxx","name":"web_search","args":{"query":"AAPL stock price"}}
 
 event: tool_result
-data: {"name":"web_search","content":"{\"price\":198.5}"}
+data: {"callId":"call_xxx","name":"web_search","content":"{\"price\":198.5}"}
 
 event: text_delta
 data: {"text":"苹果公司最新股价 198.5 美元..."}
@@ -647,7 +760,17 @@ async sendMessage(
 
 ## 6. 安全机制
 
-### 6.1 API Key 加密
+### 6.1 MCP stdio 权限隔离
+
+`stdio` 类型的 MCP Server 会在后端直接执行子进程（`command` 字段中的任意 shell 命令）。若允许普通认证用户自由填写 `command`，等同于向其开放服务器 shell 权限。
+
+**强制规则**：
+
+- `transport: 'stdio'` 配置项**仅管理员角色可写**，`AgentsService.create/update` 在保存前必须校验当前用户角色，非管理员提交 stdio 类型直接 `403 Forbidden`。
+- `transport: 'sse'` 普通用户可用，只允许连接已独立部署的 MCP Server，风险可控。
+- 后续若需要对 stdio 开放，必须引入 command 白名单机制，禁止任意字符串传入。
+
+### 6.2 API Key 加密
 
 三道保护，缺一不可：
 
@@ -659,7 +782,38 @@ async sendMessage(
 
 加密工具函数放 `src/agents/utils/crypto.util.ts`，使用 Node.js 内置 `crypto` 模块（AES-256-GCM），不引入第三方加密库。
 
-### 6.2 新增环境变量
+**`crypto.util.ts` 存储格式约定**（必须严格遵守，否则解密必然失败）：
+
+- IV：12 字节（GCM 推荐长度），每次加密随机生成，**绝不复用**
+- authTag：16 字节，由 GCM 模式自动生成
+- 数据库存储格式：`hex(iv):hex(ciphertext + authTag)`，两段均为十六进制字符串，冒号分隔
+
+```typescript
+// crypto.util.ts 参考实现
+const IV_BYTES = 12;
+const TAG_BYTES = 16;
+
+export function encrypt(plaintext: string, keyHex: string): string {
+  const iv = randomBytes(IV_BYTES);
+  const cipher = createCipheriv('aes-256-gcm', Buffer.from(keyHex, 'hex'), iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString('hex')}:${Buffer.concat([encrypted, tag]).toString('hex')}`;
+}
+
+export function decrypt(stored: string, keyHex: string): string {
+  const [ivHex, dataHex] = stored.split(':');
+  const iv = Buffer.from(ivHex, 'hex');
+  const data = Buffer.from(dataHex, 'hex');
+  const tag = data.subarray(data.length - TAG_BYTES);
+  const ciphertext = data.subarray(0, data.length - TAG_BYTES);
+  const decipher = createDecipheriv('aes-256-gcm', Buffer.from(keyHex, 'hex'), iv);
+  decipher.setAuthTag(tag);
+  return decipher.update(ciphertext) + decipher.final('utf8');
+}
+```
+
+### 6.3 新增环境变量
 
 ```bash
 # Agent 模块配置
@@ -683,6 +837,24 @@ AGENT_ENCRYPTION_KEY=your-32-byte-random-key-here
 | SSE 流式 | 任意异常 | 发送 `event: error\ndata: {"message":"..."}` 后关闭流 |
 
 **Tool 执行失败设计原则**：单个 tool 报错不终止整个 Agent，而是把错误信息作为 tool 结果返回给 LLM，让 LLM 自行决定是重试、换工具还是直接回复用户。
+
+**⚠️ 当前已知限制——并发请求**：
+
+同一 `conversationId` 不支持并发请求。若两个请求同时进入，两个 LangGraph 执行都会读取同一 thread 的 Checkpoint，各自追加消息后写回，造成状态覆盖和消息乱序。
+
+**当前版本要求**：前端必须保证同一会话串行发消息，在上一条消息的响应（同步 200 或 SSE `message_end`）返回前，禁止发出下一条。
+
+后续如需支持并发，方案是在 `ConversationsService.sendMessage()` 入口处用数据库行锁保护：
+```typescript
+// 使用 SELECT ... FOR UPDATE 锁住会话行，确保同一 conversation 串行执行
+await this.dataSource.transaction(async (em) => {
+  await em.getRepository(Conversation).findOne({
+    where: { id: conversationId },
+    lock: { mode: 'pessimistic_write' },
+  });
+  // ... 后续 Agent 执行
+});
+```
 
 ---
 
