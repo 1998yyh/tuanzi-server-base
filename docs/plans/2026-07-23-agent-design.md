@@ -3,7 +3,7 @@
 **日期**: 2026-07-23
 **模块**: `src/agents/`
 **分支**: `feat/agent`
-**状态**: 设计阶段
+**状态**: ✅ 已实现（2026-07-24，含文末「实施修正记录」）
 
 ---
 
@@ -885,4 +885,28 @@ await this.dataSource.transaction(async (em) => {
 
 ---
 
-*文档版本 v1.0 | 维护者：团子项目组 | 最后更新：2026-07-23*
+---
+
+## 10. 实施修正记录（2026-07-24）
+
+实施时核实 `@langchain/langgraph@1.4.8` / `@langchain/mcp-adapters@1.1.3` / `@modelcontextprotocol/sdk@1.29.0` / `@langchain/openai@1.5.5`，本文档代码草案基于旧版 API，以下为实际落地的差异：
+
+| # | 修正 | 说明 |
+|---|------|------|
+| 1 | LangGraph 1.x 状态定义 | `new StateGraph({ channels })` 是 0.x 旧写法，实际用 `Annotation.Root` + `messagesStateReducer`，入口边用 `addEdge(START, 'agent_node')` |
+| 2 | Checkpointer 接口 | 1.x `BaseCheckpointSaver` 抽象方法为 `getTuple`/`list`(AsyncGenerator)/`put`(4 参含 newVersions)/`putWrites`/`deleteThread`，实现参照官方 MemorySaver；序列化产物为 `Uint8Array`，base64 后存 MEDIUMTEXT |
+| 3 | AgentCheckpoint 主键 | 改自增 number（「取最新快照」按自增主键排序），thread/ns/id 三元组加唯一复合索引 |
+| 4 | 新增第 5 张表 `agent_checkpoint_writes` | putWrites 被调用时对应 checkpoint 行可能尚未写入，独立 writes 表是官方各 saver 通用做法 |
+| 5 | `loadMcpTools` 签名 | 实际为 `loadMcpTools(serverName, client, opts?)`，首参 serverName 必传 |
+| 6 | MySQL JSON 列默认值 | `mcp_servers`/`enabled_tools` 改 `nullable: true`（MySQL JSON 列不支持字面 DEFAULT），读取处 `?? []` |
+| 7 | 多用户隔离 | AgentConfig 已含 userId 字段；所有 Agent/会话接口按当前用户过滤，查不到统一 404（设计文档 API 章节未写，实现已补齐） |
+| 8 | 响应脱敏 | 所有返回 AgentConfig 的接口走 `toResponse()` 显式挑字段，只返回 `apiKeyMasked`，密文与 userId 不外泄 |
+| 9 | SSE 时序 | `ConversationsService` 拆 `prepareStream()`（同步校验 + 持久化用户消息）与 `streamMessages()`；Controller 先 await 校验再发响应头，流内异常发 `event: error` 后关闭 |
+| 10 | 角色体系 | User 实体新增 `role` 列（`user`/`admin`，默认 `user`），stdio MCP 仅 admin 可配（403）；首个管理员手工 SQL 提权；注册逻辑无需改动 |
+| 11 | 流式持久化 | assistant 消息以 `message_end` 事件携带的最终 AIMessage 内容为准（真实事件序中 tool_use 发生在 message_end 之后，逐事件拼接不可靠）；text_delta/tool_use 仅用于前端实时展示 |
+| 12 | Provider 范围 | 本期实现 anthropic + openai（已装 `@langchain/openai`）；deepseek 枚举保留但 `createModelFromConfig` 抛「暂不支持」 |
+| 13 | 归档接口 | 本期不实现，`ConversationStatus.ARCHIVED` 枚举预留；checkpoint 清理仅在 `DELETE /api/conversations/:id` 时执行（调 `checkpointer.deleteThread`） |
+| 14 | 内置工具 | `web_search` 配置 `TAVILY_API_KEY` 走 Tavily，未配置时返回明确错误文案交 LLM 决策；`calculator` 为无 eval 的递归下降解析器 |
+| 15 | 额外直接依赖 | `@langchain/langgraph-checkpoint`（pnpm 不提升传递依赖）与 `zod` 需显式安装 |
+
+*文档版本 v1.1 | 维护者：团子项目组 | 最后更新：2026-07-24*

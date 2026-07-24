@@ -6,22 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **角色**: NestJS 后端工程师
 - **技术栈**: TypeScript 5.8 + NestJS 11 + TypeORM 0.3 + MySQL 8.0 + passport-jwt + pnpm 10
-- **项目描述**: 团子后台基础服务——用户认证 + 日报（AI情报/汪汪队）内容管理 API
+- **项目描述**: 团子后台基础服务——用户认证 + 日报（AI情报/汪汪队）内容管理 + Agent 平台 API
 
 ## 项目结构
 
 ```
 src/
   auth/           # 注册/登录/刷新令牌 + JwtStrategy（依赖 UsersModule）
-  users/          # User 实体 + UsersService（无 controller，不暴露路由）
+  users/          # User 实体（含 role 字段）+ UsersService（无 controller，不暴露路由）
   daily-reports/  # 日报 CRUD，公开只读接口，无需鉴权
   llm/            # 基础 LLM 服务层（LangChain ChatAnthropic），无 controller，不暴露路由
+  agents/         # Agent 平台：配置 CRUD + 多轮会话 + LangGraph tool loop + MCP 工具 + SSE 流式
   uploads/        # ⚠️ 孤儿模块：MulterModule 磁盘存储配置，未在 app.module 注册
   common/         # guards/ decorators/ filters/（跨模块共享件）
 ```
 
-- 功能模块在 `src/app.module.ts` 注册，当前仅：`AuthModule`、`UsersModule`、`DailyReportsModule`、`LlmModule`。新增模块必须手动加进 `imports`。
+- 功能模块在 `src/app.module.ts` 注册，当前仅：`AuthModule`、`UsersModule`、`DailyReportsModule`、`LlmModule`、`AgentsModule`。新增模块必须手动加进 `imports`。
 - `uploads/` 目录（仓库根）存封面图，`main.ts` 静态服务在 `/uploads/` 前缀。文件上传端点随 novels 模块一起被删除；如需恢复上传，把 `UploadsModule` import 进使用方模块并配 `FileInterceptor`。
+- `agents/` 要点：**绕过 LlmService 自建 ChatModel**（LlmService 绑死 Anthropic 且丢弃 tool_use）；会话状态用 TypeORMCheckpointer（thread_id = conversationId）持久化；API Key AES-256-GCM 加密存储（密钥为必填环境变量 `AGENT_ENCRYPTION_KEY`，64 位 hex）；stdio 类型 MCP 仅 `role=admin` 用户可配置（首个管理员需手工 SQL 提权）；同一会话必须串行发消息（前端契约，后端未做行锁）。
 
 ## 可执行命令
 
@@ -106,6 +108,6 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 - 新增功能模块时同步更新本文件「项目结构」与 `app.module.ts` 注册清单。
 
 ---
-**版本**: v2.1
-**最后更新**: 2026-07-23
+**版本**: v2.2
+**最后更新**: 2026-07-24
 **维护者**: 团子项目组
