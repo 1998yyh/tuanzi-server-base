@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtStrategy } from 'src/auth/jwt.strategy';
 import { UsersService } from 'src/users/users.service';
 import { TokenType } from 'src/auth/auth.service';
+import { UserRole } from 'src/users/users.entity';
 
 describe('JwtStrategy', () => {
   let strategy: JwtStrategy;
@@ -13,6 +14,7 @@ describe('JwtStrategy', () => {
     email: 'test@test.com',
     username: 'testuser',
     password: 'hashedPassword',
+    role: UserRole.USER,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
@@ -55,6 +57,7 @@ describe('JwtStrategy', () => {
         id: mockUser.id,
         email: mockUser.email,
         username: mockUser.username,
+        role: mockUser.role,
         createdAt: mockUser.createdAt,
         updatedAt: mockUser.updatedAt,
       });

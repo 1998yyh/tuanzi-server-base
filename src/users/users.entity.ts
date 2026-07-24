@@ -7,6 +7,12 @@ import {
   Index,
 } from 'typeorm';
 
+/** 用户角色：普通用户 / 管理员（stdio 类型 MCP Server 仅管理员可配置） */
+export enum UserRole {
+  USER = 'user',
+  ADMIN = 'admin',
+}
+
 @Entity('users')
 export class User {
   @PrimaryGeneratedColumn('uuid')
@@ -22,6 +28,9 @@ export class User {
 
   @Column()
   password: string;
+
+  @Column({ type: 'enum', enum: UserRole, default: UserRole.USER })
+  role: UserRole;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

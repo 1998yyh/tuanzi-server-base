@@ -6,6 +6,7 @@ import { ConfigService } from '@nestjs/config';
 import { UnauthorizedException } from '@nestjs/common';
 import { RegisterDto } from 'src/auth/dto/register.dto';
 import { LoginDto } from 'src/auth/dto/login.dto';
+import { UserRole } from 'src/users/users.entity';
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -17,6 +18,7 @@ describe('AuthService', () => {
     email: 'test@test.com',
     username: 'testuser',
     password: 'hashedPassword',
+    role: UserRole.USER,
     createdAt: new Date(),
     updatedAt: new Date(),
   };

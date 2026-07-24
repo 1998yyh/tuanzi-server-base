@@ -4,6 +4,7 @@ import { AuthService } from 'src/auth/auth.service';
 import { RegisterDto } from 'src/auth/dto/register.dto';
 import { LoginDto } from 'src/auth/dto/login.dto';
 import { RefreshTokenDto } from 'src/auth/dto/refresh-token.dto';
+import { UserRole } from 'src/users/users.entity';
 
 describe('AuthController', () => {
   let controller: AuthController;
@@ -19,6 +20,7 @@ describe('AuthController', () => {
     id: 'test-uuid',
     email: 'test@test.com',
     username: 'testuser',
+    role: UserRole.USER,
     createdAt: new Date(),
     updatedAt: new Date(),
   };

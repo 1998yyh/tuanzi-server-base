@@ -4,7 +4,7 @@ import { Repository } from 'typeorm';
 import { ConflictException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { UsersService } from 'src/users/users.service';
-import { User } from 'src/users/users.entity';
+import { User, UserRole } from 'src/users/users.entity';
 
 jest.mock('bcrypt');
 
@@ -17,6 +17,7 @@ describe('UsersService', () => {
     email: 'test@test.com',
     username: 'testuser',
     password: 'hashedPassword',
+    role: UserRole.USER,
     createdAt: new Date(),
     updatedAt: new Date(),
   };
