@@ -110,7 +110,7 @@ export class ConversationsController {
   }
 
   @Get('conversations/:id/messages')
-  @ApiOperation({ summary: '获取消息历史（分页）' })
+  @ApiOperation({ summary: '获取消息历史（倒序分页，最新在前）' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @ApiResponse({ status: 404, description: '会话不存在' })
   async listMessages(

@@ -87,8 +87,37 @@ describe('AgentExecutorService', () => {
 
       expect(mockInvoke).toHaveBeenCalledTimes(1);
       expect(result).toEqual([
-        { role: MessageRole.ASSISTANT, content: '你好，我是助手', toolCalls: null },
+        {
+          role: MessageRole.ASSISTANT,
+          content: '你好，我是助手',
+          toolCalls: null,
+          totalTokens: null,
+        },
       ]);
+    });
+
+    it('assistant 消息应该携带跨条累计的 token 用量', async () => {
+      toolRegistry.getToolsForAgent.mockResolvedValue([calculatorTool]);
+      mockInvoke
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '我先算一下',
+            tool_calls: [{ id: 'call_1', name: 'calculator', args: { expression: '6*7' } }],
+            usage_metadata: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+          }),
+        )
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '答案是 42',
+            usage_metadata: { input_tokens: 20, output_tokens: 5, total_tokens: 25 },
+          }),
+        );
+
+      const result = await service.run(buildAgent(), 'conv-1', '6乘7等于几');
+
+      // 第一条 assistant 累计 15，最后一条累计 15+25=40（= 本轮总消耗）
+      expect(result[0].totalTokens).toBe(15);
+      expect(result[2].totalTokens).toBe(40);
     });
 
     it('tool loop：一轮工具调用后应该回到 agent_node 并结束', async () => {
@@ -198,7 +227,7 @@ describe('AgentExecutorService', () => {
 
       // 只包含本轮新增的 assistant 消息，不含历史
       expect(second).toEqual([
-        { role: MessageRole.ASSISTANT, content: '第二轮回答', toolCalls: null },
+        { role: MessageRole.ASSISTANT, content: '第二轮回答', toolCalls: null, totalTokens: null },
       ]);
     });
 

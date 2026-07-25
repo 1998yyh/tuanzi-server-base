@@ -93,7 +93,16 @@ export class AgentExecutorService {
 
     // 只取本轮新增部分（+1 跳过 userMessage 本身，它已由 ConversationsService 单独持久化）
     const newMessages = (result.messages as BaseMessage[]).slice(previousCount + 1);
-    return newMessages.map((m) => this.toMessageData(m));
+    // token 用量跨条累计，与流式路径语义一致（最后一条 assistant = 本轮总消耗）
+    let runningTotal = 0;
+    return newMessages.map((m) => {
+      const data = this.toMessageData(m);
+      if (data.totalTokens != null) {
+        runningTotal += data.totalTokens;
+        data.totalTokens = runningTotal;
+      }
+      return data;
+    });
   }
 
   /**
@@ -244,10 +253,12 @@ export class AgentExecutorService {
         name: tc.name,
         args: tc.args as Record<string, unknown>,
       }));
+      const usage = message.usage_metadata;
       return {
         role: MessageRole.ASSISTANT,
         content: this.extractText(message.content),
         toolCalls: toolCalls?.length ? toolCalls : null,
+        totalTokens: usage ? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) : null,
       };
     }
     // HumanMessage 等不持久化（用户消息由 ConversationsService 单独写）

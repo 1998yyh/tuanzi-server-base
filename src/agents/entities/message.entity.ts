@@ -62,7 +62,11 @@ export class Message {
   @Column({ name: 'tool_call_id', nullable: true })
   toolCallId: string | null;
 
-  /** 本轮累计 token 消耗（input+output），只写在每轮最终的 assistant 消息上，其余为 NULL */
+  /**
+   * 累计 token 消耗（input+output），仅 assistant 消息有值，其余为 NULL。
+   * 同步路径：每条 assistant 记截至本条的轮内累计值；
+   * 流式路径：跨轮累计值只写在本轮最终的 assistant 消息上。
+   */
   @Column({ name: 'total_tokens', type: 'int', nullable: true })
   totalTokens: number | null;
 

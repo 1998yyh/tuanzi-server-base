@@ -6,6 +6,8 @@ export interface NewMessageData {
   content: string;
   toolCalls?: ToolCallRecord[] | null;
   toolCallId?: string | null;
+  /** 截至本条 assistant 消息的累计 token 消耗（仅 assistant 有值） */
+  totalTokens?: number | null;
 }
 
 /** SSE 事件：type 为事件名，data 为 JSON 负载 */

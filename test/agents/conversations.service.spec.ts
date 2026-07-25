@@ -166,6 +166,14 @@ describe('ConversationsService', () => {
       expect(messageRepo.save).not.toHaveBeenCalled();
     });
 
+    it('prepareStream 只做校验，不应该落库 user 消息', async () => {
+      conversationRepo.findOne.mockResolvedValue({ ...conversation });
+
+      await service.prepareStream('user-1', 'conv-1');
+
+      expect(messageRepo.save).not.toHaveBeenCalled();
+    });
+
     it('streamMessages 应该透传事件并在流结束后统一持久化（user + agent 消息）', async () => {
       // 真实事件序：tool_use 发生在 message_end 之后，
       // assistant 消息以 message_end 携带的最终内容为准
@@ -254,6 +262,50 @@ describe('ConversationsService', () => {
       expect(messageRepo.save.mock.calls[0][0]).toMatchObject({
         role: MessageRole.USER,
         content: '你好',
+      });
+    });
+
+    it('已有标题的会话不应该覆盖标题', async () => {
+      executor.runStream.mockReturnValue((async function* () {})());
+
+      for await (const _ of service.streamMessages({ ...conversation, title: '旧标题' }, '你好')) {
+        // 消费空流
+      }
+
+      expect(conversationRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('流中途异常不应该落库任何消息（展示层零残留）', async () => {
+      executor.runStream.mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', data: { text: '半截话' } } as SseEvent;
+          throw new Error('LLM 连接中断');
+        })(),
+      );
+
+      await expect(async () => {
+        for await (const _ of service.streamMessages(conversation, '你好')) {
+          // 消费到异常
+        }
+      }).rejects.toThrow('LLM 连接中断');
+
+      expect(messageRepo.save).not.toHaveBeenCalled();
+      expect(conversationRepo.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('listMessages', () => {
+    it('应该按 seq 倒序分页（最新在前）', async () => {
+      conversationRepo.findOne.mockResolvedValue({ ...conversation });
+      messageRepo.findAndCount.mockResolvedValue([[], 0]);
+
+      await service.listMessages('user-1', 'conv-1', { page: 1, limit: 20 });
+
+      expect(messageRepo.findAndCount).toHaveBeenCalledWith({
+        where: { conversationId: 'conv-1' },
+        order: { seq: 'DESC' },
+        skip: 0,
+        take: 20,
       });
     });
   });
