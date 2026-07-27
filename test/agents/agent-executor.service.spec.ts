@@ -105,7 +105,11 @@ describe('AgentExecutorService', () => {
       const result = await service.run(buildAgent(), 'conv-1', '6乘7等于几');
 
       expect(mockInvoke).toHaveBeenCalledTimes(2);
-      expect(calculatorTool.invoke).toHaveBeenCalledWith({ expression: '6*7' });
+      // 第二参经 metadata 透传 tool_call_id，供 SSE 事件与历史归组配对
+      expect(calculatorTool.invoke).toHaveBeenCalledWith(
+        { expression: '6*7' },
+        { metadata: { tool_call_id: 'call_1' } },
+      );
       expect(result).toHaveLength(3);
       expect(result[0]).toMatchObject({
         role: MessageRole.ASSISTANT,

@@ -158,7 +158,7 @@ export class AgentExecutorService {
           (lastMsg.tool_calls ?? []).map(async (call) => {
             const tool = tools.find((t) => t.name === call.name);
             const output = tool
-              ? await this.invokeToolWithTimeout(tool, call.args).catch(
+              ? await this.invokeToolWithTimeout(tool, call.args, call.id).catch(
                   (e: Error) => `工具调用失败: ${e.message}`,
                 )
               : `未找到工具: ${call.name}`;
@@ -184,11 +184,20 @@ export class AgentExecutorService {
     return graph.compile({ checkpointer: this.checkpointer });
   }
 
-  /** 带超时的工具调用；无论成败都清理定时器，避免悬挂 30s 的 timer */
-  private invokeToolWithTimeout(tool: StructuredToolInterface, args: unknown): Promise<unknown> {
+  /**
+   * 带超时的工具调用；无论成败都清理定时器，避免悬挂 30s 的 timer。
+   * toolCallId 经 RunnableConfig.metadata 透传，使 streamEvents 的
+   * on_tool_start/on_tool_end 事件能以模型的 tool_call id（而非运行时 run_id）
+   * 标识调用——前端流式配对与消息历史归组（toolCallId ↔ toolCalls[].id）都依赖它。
+   */
+  private invokeToolWithTimeout(
+    tool: StructuredToolInterface,
+    args: unknown,
+    toolCallId?: string,
+  ): Promise<unknown> {
     let timer: NodeJS.Timeout | undefined;
     return Promise.race([
-      Promise.resolve(tool.invoke(args)),
+      Promise.resolve(tool.invoke(args, { metadata: { tool_call_id: toolCallId ?? '' } })),
       new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new Error(`工具调用超时（${TOOL_TIMEOUT_MS / 1000}s）`)),
@@ -294,7 +303,9 @@ export class AgentExecutorService {
         return {
           type: 'tool_use',
           data: {
-            id: event.run_id,
+            // 优先用模型的 tool_call id（invoke 时经 metadata 透传），回退 run_id
+            id: ((event.metadata as Record<string, unknown> | undefined)?.tool_call_id ||
+              event.run_id) as string,
             name: event.name,
             args: (event.data?.input as Record<string, unknown>) ?? {},
           },
@@ -308,7 +319,12 @@ export class AgentExecutorService {
             : String(output ?? '');
         return {
           type: 'tool_result',
-          data: { callId: event.run_id, name: event.name, content },
+          data: {
+            callId: ((event.metadata as Record<string, unknown> | undefined)?.tool_call_id ||
+              event.run_id) as string,
+            name: event.name,
+            content,
+          },
         };
       }
 
