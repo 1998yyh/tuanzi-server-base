@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { MoreThan, Repository } from 'typeorm';
 import { RunnableConfig } from '@langchain/core/runnables';
 import {
   BaseCheckpointSaver,
@@ -17,6 +17,12 @@ import {
 } from '@langchain/langgraph-checkpoint';
 import { AgentCheckpoint } from '../entities/agent-checkpoint.entity';
 import { AgentCheckpointWrite } from '../entities/agent-checkpoint-write.entity';
+
+/** 流开始前两表的自增 id 水位（0 表示表内尚无该 thread 的行） */
+export interface CheckpointBaseline {
+  cpMaxId: number;
+  wrMaxId: number;
+}
 
 /**
  * LangGraph BaseCheckpointSaver 的 TypeORM（MySQL）适配器。
@@ -256,6 +262,29 @@ export class TypeORMCheckpointer extends BaseCheckpointSaver {
   async deleteThread(threadId: string): Promise<void> {
     await this.checkpointRepo.delete({ threadId });
     await this.writesRepo.delete({ threadId });
+  }
+
+  /**
+   * 记录流开始前两表的自增 id 水位，供失败时 rollbackToBaseline 恢复。
+   * 前提：同一 thread 串行执行（类注释的并发限制），否则会互删对方的写入。
+   */
+  async captureBaseline(threadId: string): Promise<CheckpointBaseline> {
+    const [cp, wr] = await Promise.all([
+      this.checkpointRepo.findOne({ where: { threadId }, order: { id: 'DESC' } }),
+      this.writesRepo.findOne({ where: { threadId }, order: { id: 'DESC' } }),
+    ]);
+    return { cpMaxId: cp?.id ?? 0, wrMaxId: wr?.id ?? 0 };
+  }
+
+  /**
+   * 删除基线之后的所有快照与写入，把 thread 恢复到流开始前的状态。
+   * writes 必须按 id 划界删（而非按新 checkpointId 关联）：失败 run 首个
+   * super-step 的 putWrites 挂在基线 checkpoint 上，按关联删会留下脏
+   * pendingWrites，下次 getTuple 会把它们当作待恢复写入喂给 LangGraph。
+   */
+  async rollbackToBaseline(threadId: string, baseline: CheckpointBaseline): Promise<void> {
+    await this.checkpointRepo.delete({ threadId, id: MoreThan(baseline.cpMaxId) });
+    await this.writesRepo.delete({ threadId, id: MoreThan(baseline.wrMaxId) });
   }
 
   private encode(bytes: Uint8Array): string {

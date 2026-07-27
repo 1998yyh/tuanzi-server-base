@@ -78,7 +78,7 @@ export class ConversationsController {
     if (stream === 'true') {
       // SSE 模式：先同步校验（抛错走正常 JSON 错误响应），通过后才发响应头。
       // NestJS @Sse() 仅支持 GET，POST 流式需手动设响应头
-      const conversation = await this.conversationsService.prepareStream(user.id, id, dto.content);
+      const conversation = await this.conversationsService.prepareStream(user.id, id);
 
       res.status(200);
       res.setHeader('Content-Type', 'text/event-stream');

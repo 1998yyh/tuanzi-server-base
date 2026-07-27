@@ -3,6 +3,8 @@ import {
   Column,
   PrimaryGeneratedColumn,
   CreateDateColumn,
+  Generated,
+  Index,
   ManyToOne,
   JoinColumn,
 } from 'typeorm';
@@ -25,9 +27,20 @@ export interface ToolCallRecord {
  * 无需反序列化 LangGraph 状态
  */
 @Entity('messages')
+@Index(['conversationId', 'createdAt'])
 export class Message {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  /**
+   * 自增排序键：同一轮消息批量 INSERT 时 created_at（datetime(6)）完全相同，
+   * uuid 主键又无序，DESC 分页需要 seq 做同刻 tie-break（页内顺序 = 插入顺序）。
+   * bigint 在 TypeORM 中映射为 string，仅作排序，不参与业务。
+   */
+  @Index({ unique: true })
+  @Column({ type: 'bigint' })
+  @Generated('increment')
+  seq: string;
 
   @ManyToOne(() => Conversation, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'conversation_id' })
@@ -48,6 +61,10 @@ export class Message {
   /** tool 结果消息关联的 call id */
   @Column({ name: 'tool_call_id', nullable: true })
   toolCallId: string | null;
+
+  /** 本轮累计 token 消耗（input+output），只写在每轮最终的 assistant 消息上，其余为 NULL */
+  @Column({ name: 'total_tokens', type: 'int', nullable: true })
+  totalTokens: number | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

@@ -160,14 +160,13 @@ describe('ConversationsService', () => {
   });
 
   describe('流式聊天', () => {
-    it('prepareStream 校验失败应该在流开始前抛错', async () => {
+    it('prepareStream 校验失败应该在流开始前抛错（不落库）', async () => {
       conversationRepo.findOne.mockResolvedValue(null);
-      await expect(service.prepareStream('other', 'conv-1', '你好')).rejects.toThrow(
-        NotFoundException,
-      );
+      await expect(service.prepareStream('other', 'conv-1')).rejects.toThrow(NotFoundException);
+      expect(messageRepo.save).not.toHaveBeenCalled();
     });
 
-    it('streamMessages 应该透传事件并在流结束后持久化消息', async () => {
+    it('streamMessages 应该透传事件并在流结束后统一持久化（user + agent 消息）', async () => {
       // 真实事件序：tool_use 发生在 message_end 之后，
       // assistant 消息以 message_end 携带的最终内容为准
       const events: SseEvent[] = [
@@ -215,8 +214,16 @@ describe('ConversationsService', () => {
 
       expect(received).toHaveLength(events.length);
 
-      const savedMessages = messageRepo.save.mock.calls[0][0] as Partial<Message>[];
-      // assistant(带 toolCalls) + tool + assistant = 3 条
+      // 第一次 save：user 消息（落库时机后移到流正常结束，含标题回填）
+      expect(messageRepo.save).toHaveBeenCalledTimes(2);
+      expect(messageRepo.save.mock.calls[0][0]).toMatchObject({
+        role: MessageRole.USER,
+        content: '查股价',
+      });
+      expect(conversationRepo.update).toHaveBeenCalledWith('conv-1', { title: '查股价' });
+
+      // 第二次 save：assistant(带 toolCalls) + tool + assistant = 3 条
+      const savedMessages = messageRepo.save.mock.calls[1][0] as Partial<Message>[];
       expect(savedMessages).toHaveLength(3);
       expect(savedMessages[0]).toMatchObject({
         role: MessageRole.ASSISTANT,
@@ -231,16 +238,23 @@ describe('ConversationsService', () => {
         role: MessageRole.ASSISTANT,
         content: '最新股价 198.5',
       });
+      // token 跨轮累计值只写在本轮最后一条 assistant 消息上
+      expect(savedMessages[0].totalTokens).toBeUndefined();
+      expect(savedMessages[2].totalTokens).toBe(200);
     });
 
-    it('没有产生消息时不应该写库', async () => {
+    it('流正常结束但没有 agent 消息时，只落 user 消息', async () => {
       executor.runStream.mockReturnValue((async function* () {})());
 
       for await (const _ of service.streamMessages(conversation, '你好')) {
         // 消费空流
       }
 
-      expect(messageRepo.save).not.toHaveBeenCalled();
+      expect(messageRepo.save).toHaveBeenCalledTimes(1);
+      expect(messageRepo.save.mock.calls[0][0]).toMatchObject({
+        role: MessageRole.USER,
+        content: '你好',
+      });
     });
   });
 

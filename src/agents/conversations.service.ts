@@ -82,6 +82,9 @@ export class ConversationsService {
 
   /**
    * 同步聊天：持久化用户消息 → 执行 LangGraph → 持久化 agent 消息。
+   *
+   * ⚠️ 已知不对称：同步路径执行失败时，已落库的 user 消息与 checkpoint 会残留
+   * （与 SSE 路径的「失败零残留」语义不同）。前端只走 SSE 路径，暂不处理。
    */
   async sendMessage(
     userId: string,
@@ -101,31 +104,31 @@ export class ConversationsService {
   }
 
   /**
-   * 流式聊天第一步（同步校验）：校验归属与状态、持久化用户消息。
+   * 流式聊天第一步（同步校验）：只校验归属与 Agent 状态，**不落库**。
    * 必须在 SSE 响应头发送前完成——这里抛错走正常 JSON 错误响应。
+   * user 消息延迟到流正常结束后与本轮 assistant/tool 消息一起持久化
+   * （streamMessages），保证流中途异常时数据库零残留，前端可原样重发。
    */
-  async prepareStream(
-    userId: string,
-    conversationId: string,
-    content: string,
-  ): Promise<Conversation> {
-    const conversation = await this.loadOwnedConversation(userId, conversationId);
-    await this.persistUserMessage(conversation, content);
-    return conversation;
+  async prepareStream(userId: string, conversationId: string): Promise<Conversation> {
+    return this.loadOwnedConversation(userId, conversationId);
   }
 
   /**
    * 流式聊天第二步：透传 SSE 事件，同时收集 agent 消息，
-   * 流结束后统一持久化，保证消息历史完整。
+   * 流结束后统一持久化（user 消息 + 本轮 assistant/tool 消息），
+   * 保证消息历史完整且流中途异常时数据库零残留（前端可原样重发）。
    *
    * 持久化策略：assistant 消息以 message_end 事件的最终内容为准
    * （真实事件序中 tool_use 发生在 message_end 之后，逐事件拼接不可靠）；
    * text_delta / tool_use 仅用于前端实时展示。
+   * token 消耗取最后一个 message_end 的跨轮累计值，
+   * 只写在本轮最后一条 assistant 消息上（见 Message.totalTokens 注释）。
    */
   async *streamMessages(conversation: Conversation, content: string): AsyncGenerator<SseEvent> {
     const conversationId = conversation.id;
 
     const pendingMessages: Partial<Message>[] = [];
+    let totalTokens = 0;
 
     for await (const event of this.agentExecutor.runStream(
       conversation.agentConfig,
@@ -148,7 +151,9 @@ export class ConversationsService {
           const data = event.data as {
             content: string;
             toolCalls: Message['toolCalls'];
+            totalTokens?: number;
           };
+          totalTokens = data.totalTokens ?? totalTokens;
           if (data.content || data.toolCalls?.length) {
             pendingMessages.push({
               conversationId,
@@ -162,7 +167,14 @@ export class ConversationsService {
       }
     }
 
+    // 流正常结束：先落 user 消息（含首条标题回填），再落本轮 agent 消息，
+    // seq 自增序即消息序；token 累计值写到最后一条 assistant 消息上
+    await this.persistUserMessage(conversation, content);
     if (pendingMessages.length) {
+      const lastAssistant = pendingMessages.findLast((m) => m.role === MessageRole.ASSISTANT);
+      if (lastAssistant) {
+        lastAssistant.totalTokens = totalTokens;
+      }
       await this.messageRepo.save(pendingMessages.map((m) => this.messageRepo.create(m)));
     }
   }
@@ -170,9 +182,11 @@ export class ConversationsService {
   async listMessages(userId: string, conversationId: string, query: QueryConversationsDto) {
     await this.loadOwnedConversation(userId, conversationId);
     const { page = 1, limit = 20 } = query;
+    // DESC 分页：page=1 为最新一页，前端向上翻页取更早消息。
+    // 用 seq（自增=插入序）而非 createdAt——同轮批量 INSERT 的 created_at 完全相同（见 Message.seq 注释）
     const [items, total] = await this.messageRepo.findAndCount({
       where: { conversationId },
-      order: { createdAt: 'ASC' },
+      order: { seq: 'DESC' },
       skip: (page - 1) * limit,
       take: limit,
     });
