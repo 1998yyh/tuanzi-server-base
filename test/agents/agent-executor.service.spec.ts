@@ -1,5 +1,4 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException } from '@nestjs/common';
 import { MemorySaver } from '@langchain/langgraph';
 import { AIMessage } from '@langchain/core/messages';
 import { StructuredToolInterface } from '@langchain/core/tools';
@@ -265,10 +264,24 @@ describe('AgentExecutorService', () => {
       });
     });
 
-    it('deepseek provider 应该抛 BadRequestException', async () => {
-      await expect(
-        service.run(buildAgent({ provider: ProviderType.DEEPSEEK }), 'conv-1', '你好'),
-      ).rejects.toThrow(BadRequestException);
+    it('deepseek provider 应该创建 ChatOpenAI 并指向 DeepSeek baseURL', async () => {
+      const { ChatOpenAI } = jest.requireMock('@langchain/openai') as {
+        ChatOpenAI: jest.Mock;
+      };
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(
+        buildAgent({ provider: ProviderType.DEEPSEEK, model: 'deepseek-v4-flash' }),
+        'conv-1',
+        '你好',
+      );
+
+      expect(ChatOpenAI).toHaveBeenCalledWith({
+        apiKey: API_KEY,
+        model: 'deepseek-v4-flash',
+        maxTokens: 4096,
+        configuration: { baseURL: 'https://api.deepseek.com' },
+      });
     });
   });
 });

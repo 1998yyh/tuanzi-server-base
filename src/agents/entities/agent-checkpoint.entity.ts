@@ -27,7 +27,7 @@ export class AgentCheckpoint {
   @Column({ name: 'checkpoint_id', length: 36 })
   checkpointId: string;
 
-  @Column({ name: 'parent_checkpoint_id', length: 36, nullable: true })
+  @Column({ name: 'parent_checkpoint_id', type: 'varchar', length: 36, nullable: true })
   parentCheckpointId: string | null;
 
   /** base64 编码的序列化 Checkpoint */

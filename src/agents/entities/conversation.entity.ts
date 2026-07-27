@@ -30,7 +30,7 @@ export class Conversation {
   agentConfigId: string;
 
   /** 默认取首条用户消息前 30 字 */
-  @Column({ length: 255, nullable: true })
+  @Column({ type: 'varchar', length: 255, nullable: true })
   title: string | null;
 
   @Column({

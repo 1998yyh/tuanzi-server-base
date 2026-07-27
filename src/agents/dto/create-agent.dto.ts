@@ -65,7 +65,7 @@ export class CreateAgentDto {
   @ApiProperty({
     enum: ProviderType,
     example: 'anthropic',
-    description: 'LLM 供应商（deepseek 暂未支持）',
+    description: 'LLM 供应商',
   })
   @IsEnum(ProviderType)
   provider: ProviderType;

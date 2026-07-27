@@ -59,7 +59,7 @@ export class Message {
   toolCalls: ToolCallRecord[] | null;
 
   /** tool 结果消息关联的 call id */
-  @Column({ name: 'tool_call_id', nullable: true })
+  @Column({ name: 'tool_call_id', type: 'varchar', length: 255, nullable: true })
   toolCallId: string | null;
 
   /**
