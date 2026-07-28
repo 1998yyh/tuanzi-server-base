@@ -139,6 +139,9 @@ describe('AgentsService', () => {
 
       const result = await service.findAll('user-1', { page: 1, limit: 10 });
 
+      expect(repo.findAndCount).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { userId: 'user-1', isActive: true } }),
+      );
       expect(result).toMatchObject({ total: 1, page: 1, limit: 10, totalPages: 1 });
       expect(result.items[0].apiKeyMasked).toBe('****3456');
     });
@@ -148,6 +151,9 @@ describe('AgentsService', () => {
     it('查不到（含他人的 Agent）应该抛 404', async () => {
       repo.findOne.mockResolvedValue(null);
       await expect(service.findOne('other-user', 'agent-1')).rejects.toThrow(NotFoundException);
+      expect(repo.findOne).toHaveBeenCalledWith({
+        where: { id: 'agent-1', userId: 'other-user' },
+      });
     });
   });
 
@@ -173,6 +179,13 @@ describe('AgentsService', () => {
 
       const saved = repo.save.mock.calls[0][0] as AgentConfig;
       expect(saved.isActive).toBe(false);
+    });
+
+    it('他人的 Agent 应该抛 404 且不写库', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await expect(service.remove('other-user', 'agent-1')).rejects.toThrow(NotFoundException);
+      expect(repo.save).not.toHaveBeenCalled();
     });
   });
 

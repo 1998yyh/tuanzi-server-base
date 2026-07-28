@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
 import { Annotation, END, START, StateGraph, messagesStateReducer } from '@langchain/langgraph';
 import {
   AIMessage,
@@ -74,6 +74,8 @@ export interface BatchRunOptions {
  */
 @Injectable()
 export class AgentExecutorService {
+  private readonly logger = new Logger(AgentExecutorService.name);
+
   constructor(
     private readonly toolRegistry: ToolRegistryService,
     private readonly checkpointer: TypeORMCheckpointer,
@@ -231,7 +233,16 @@ export class AgentExecutorService {
       runBatch: (userMessage, options) => this.runBatch(config, userMessage, options),
       buildSubTools: (skill) => this.buildSkillSubTools(config, skill),
     });
-    return [...tools, ...skillTools];
+    // Skill 名与内置/MCP 工具同名时跳过：bindTools 收到重名工具会让模型 API 直接报错
+    const existingNames = new Set(tools.map((t) => t.name));
+    const dedupedSkillTools = skillTools.filter((t) => {
+      if (existingNames.has(t.name)) {
+        this.logger.warn(`Skill 工具 "${t.name}" 与内置/MCP 工具同名，已跳过`);
+        return false;
+      }
+      return true;
+    });
+    return [...tools, ...dedupedSkillTools];
   }
 
   /** Skill 子 Agent 的工具集：Skill.enabledTools（内置）+ Skill.mcpServers（MCP，过滤停用并解密） */

@@ -280,6 +280,19 @@ describe('AgentExecutorService', () => {
       expect(mockBindTools).toHaveBeenCalledWith([skillTool]);
     });
 
+    it('Skill 工具与内置/MCP 工具同名时应该跳过，避免 bindTools 重名报错', async () => {
+      const mcpTool = { name: 'generate_ai_report', invoke: jest.fn() };
+      const dupSkillTool = { name: 'generate_ai_report', invoke: jest.fn() };
+      const uniqueSkillTool = { name: 'generate_stock_report', invoke: jest.fn() };
+      toolRegistry.getToolsForAgent.mockResolvedValue([mcpTool]);
+      skillToolFactory.createToolsForAgent.mockResolvedValue([dupSkillTool, uniqueSkillTool]);
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(buildAgent(), 'conv-1', '你好');
+
+      expect(mockBindTools).toHaveBeenCalledWith([mcpTool, uniqueSkillTool]);
+    });
+
     it('isSkillExecution=true 时不应该注入 Skill 工具（防递归）', async () => {
       mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
 
