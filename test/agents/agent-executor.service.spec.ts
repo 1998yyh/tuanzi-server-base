@@ -260,6 +260,58 @@ describe('AgentExecutorService', () => {
     });
   });
 
+  describe('runBatch（批量执行）', () => {
+    it('带 threadId 且无覆盖项时应该走 checkpoint（等价 run）', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: '批量回答' }));
+
+      const result = await service.runBatch(buildAgent(), '生成日报', { threadId: 'conv-9' });
+
+      expect(toolRegistry.getToolsForAgent).toHaveBeenCalled();
+      expect(result).toEqual([
+        { role: MessageRole.ASSISTANT, content: '批量回答', toolCalls: null, totalTokens: null },
+      ]);
+    });
+
+    it('无 threadId 时应该一次性执行，不写 checkpoint 且只返回本轮消息', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: '子 Agent 输出' }));
+
+      const result = await service.runBatch(buildAgent(), '执行任务');
+
+      expect(result).toEqual([
+        {
+          role: MessageRole.ASSISTANT,
+          content: '子 Agent 输出',
+          toolCalls: null,
+          totalTokens: null,
+        },
+      ]);
+    });
+
+    it('overrideSystemPrompt 应该替代 Agent 自身的 systemPrompt', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.runBatch(buildAgent({ systemPrompt: '原始提示词' }), '执行任务', {
+        overrideSystemPrompt: 'Skill 的执行指令',
+      });
+
+      const inputMessages = mockInvoke.mock.calls[0][0] as {
+        _getType(): string;
+        content: unknown;
+      }[];
+      expect(inputMessages[0]._getType()).toBe('system');
+      expect(inputMessages[0].content).toBe('Skill 的执行指令');
+    });
+
+    it('overrideTools 时不应该再加载 Agent 工具', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.runBatch(buildAgent(), '执行任务', { overrideTools: [calculatorTool] });
+
+      expect(toolRegistry.getToolsForAgent).not.toHaveBeenCalled();
+      expect(mockBindTools).toHaveBeenCalledWith([calculatorTool]);
+    });
+  });
+
   describe('createModelFromConfig', () => {
     it('openai provider 应该创建 ChatOpenAI 并传入解密后的 key', async () => {
       const { ChatOpenAI } = jest.requireMock('@langchain/openai') as {

@@ -46,6 +46,18 @@ type AgentState = typeof AgentStateAnnotation.State;
 const AGENT_NODE = 'agent_node';
 const TOOLS_NODE = 'tools_node';
 
+/** runBatch 批量执行选项 */
+export interface BatchRunOptions {
+  /** 提供则走 checkpointer 持久化（thread_id = 该值）；缺省为一次性无历史执行 */
+  threadId?: string;
+  /** Skill 子 Agent 的执行指令（替代 agentConfig.systemPrompt） */
+  overrideSystemPrompt?: string | null;
+  /** Skill 子 Agent 的工具集（替代正常工具加载） */
+  overrideTools?: StructuredToolInterface[];
+  /** 防递归：为 true 时不注入 Skill 工具（Task 4 生效） */
+  isSkillExecution?: boolean;
+}
+
 /**
  * Agent 执行核心：LangGraph 状态图（ReAct loop）构建与执行。
  *
@@ -148,13 +160,66 @@ export class AgentExecutorService {
     }
   }
 
+  /**
+   * 批量执行：不走 SSE，await 完整结果后返回本轮新增消息。
+   *
+   * 两种形态：
+   * - 带 threadId 且无覆盖项：等价 run（走 checkpoint，第三期定时任务用）
+   * - 其余：一次性无历史执行（Skill 子 Agent 用），不产生 checkpoint 数据
+   */
+  async runBatch(
+    agentConfig: AgentConfig,
+    userMessage: string,
+    options: BatchRunOptions = {},
+  ): Promise<NewMessageData[]> {
+    const hasOverrides =
+      options.overrideTools !== undefined ||
+      options.overrideSystemPrompt !== undefined ||
+      options.isSkillExecution === true;
+    if (options.threadId && !hasOverrides) {
+      return this.run(agentConfig, options.threadId, userMessage);
+    }
+
+    const tools = options.overrideTools ?? (await this.getAllTools(agentConfig));
+    const graph = this.buildGraph(
+      { ...agentConfig, systemPrompt: options.overrideSystemPrompt ?? agentConfig.systemPrompt },
+      tools,
+      false,
+    );
+    const invokeConfig = options.threadId ? { configurable: { thread_id: options.threadId } } : {};
+
+    const result = await graph.invoke(
+      {
+        messages: [new HumanMessage(userMessage)],
+        maxIterations: agentConfig.maxIterations,
+      },
+      invokeConfig,
+    );
+
+    // 一次性执行无历史：跳过 userMessage 本身即全部新增消息
+    const newMessages = (result.messages as BaseMessage[]).slice(1);
+    let runningTotal = 0;
+    return newMessages.map((m) => {
+      const data = this.toMessageData(m);
+      if (data.totalTokens != null) {
+        runningTotal += data.totalTokens;
+        data.totalTokens = runningTotal;
+      }
+      return data;
+    });
+  }
+
   /** 汇总内置工具 + 全局 MCP Server 工具（从 mcp_servers 表加载并解密后建连） */
   private async getAllTools(config: AgentConfig): Promise<StructuredToolInterface[]> {
     const mcpServers = await this.mcpServersService.findByAgentConfig(config.id);
     return this.toolRegistry.getToolsForAgent(config, mcpServers);
   }
 
-  private buildGraph(config: AgentConfig, tools: StructuredToolInterface[]) {
+  private buildGraph(
+    config: AgentConfig,
+    tools: StructuredToolInterface[],
+    useCheckpointer = true,
+  ) {
     const model = this.createModelFromConfig(config);
     if (tools.length && !model.bindTools) {
       throw new BadRequestException(`模型 ${config.model} 不支持工具调用，请关闭工具配置`);
@@ -198,7 +263,7 @@ export class AgentExecutorService {
       })
       .addEdge(TOOLS_NODE, AGENT_NODE);
 
-    return graph.compile({ checkpointer: this.checkpointer });
+    return graph.compile(useCheckpointer ? { checkpointer: this.checkpointer } : {});
   }
 
   /**
