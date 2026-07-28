@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -21,6 +22,7 @@ import { CreateAgentDto } from './dto/create-agent.dto';
 import { UpdateAgentDto } from './dto/update-agent.dto';
 import { QueryAgentsDto } from './dto/query-agents.dto';
 import { AgentResponseDto } from './dto/agent-response.dto';
+import { UpdateAgentMcpServersDto } from './dto/update-agent-mcp-servers.dto';
 
 @ApiTags('Agent')
 @ApiBearerAuth()
@@ -30,10 +32,9 @@ export class AgentsController {
   constructor(private readonly agentsService: AgentsService) {}
 
   @Post()
-  @ApiOperation({ summary: '创建 Agent', description: 'stdio 类型的 MCP Server 仅管理员可配置' })
+  @ApiOperation({ summary: '创建 Agent' })
   @ApiResponse({ status: 201, description: '创建成功', type: AgentResponseDto })
   @ApiResponse({ status: 401, description: '未授权' })
-  @ApiResponse({ status: 403, description: '非管理员配置 stdio 类型 MCP Server' })
   async create(
     @CurrentUser() user: Omit<User, 'password'>,
     @Body() dto: CreateAgentDto,
@@ -62,7 +63,6 @@ export class AgentsController {
   @Patch(':id')
   @ApiOperation({ summary: '更新 Agent 配置', description: 'apiKey 不传则保持原值' })
   @ApiResponse({ status: 200, description: '更新成功', type: AgentResponseDto })
-  @ApiResponse({ status: 403, description: '非管理员配置 stdio 类型 MCP Server' })
   @ApiResponse({ status: 404, description: 'Agent 不存在' })
   async update(
     @CurrentUser() user: Omit<User, 'password'>,
@@ -85,5 +85,32 @@ export class AgentsController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<void> {
     return this.agentsService.remove(user.id, id);
+  }
+
+  @Get(':id/mcp-servers')
+  @ApiOperation({ summary: 'Agent 已关联的 MCP Server 列表' })
+  @ApiResponse({ status: 200, description: '获取成功' })
+  @ApiResponse({ status: 404, description: 'Agent 不存在' })
+  async getMcpServers(
+    @CurrentUser() user: Omit<User, 'password'>,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.agentsService.getMcpServers(user.id, id);
+  }
+
+  @Put(':id/mcp-servers')
+  @ApiOperation({
+    summary: '整体替换 Agent 关联的 MCP Server',
+    description: 'stdio 类型仅管理员可关联；传空数组清空关联',
+  })
+  @ApiResponse({ status: 200, description: '更新成功' })
+  @ApiResponse({ status: 403, description: '非管理员关联 stdio 类型' })
+  @ApiResponse({ status: 404, description: 'Agent 或 MCP Server 不存在' })
+  async updateMcpServers(
+    @CurrentUser() user: Omit<User, 'password'>,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateAgentMcpServersDto,
+  ) {
+    return this.agentsService.updateMcpServers(user, id, dto.mcpServerIds);
   }
 }

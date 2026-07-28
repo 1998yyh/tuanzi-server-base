@@ -1,9 +1,11 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { NotFoundException } from '@nestjs/common';
 import { AgentsService } from 'src/agents/agents.service';
 import { AgentConfig, ProviderType } from 'src/agents/entities/agent-config.entity';
+import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
+import { McpServer, McpServerType } from 'src/mcp-servers/mcp-server.entity';
 import { AGENT_ENCRYPTION_KEY } from 'src/agents/utils/encryption-key.provider';
 import { decrypt, encrypt } from 'src/agents/utils/crypto.util';
 import { UserRole } from 'src/users/users.entity';
@@ -14,6 +16,7 @@ const API_KEY = 'sk-ant-api03-abcdefg123456';
 describe('AgentsService', () => {
   let service: AgentsService;
   let repo: jest.Mocked<Repository<AgentConfig>>;
+  let mcpServersService: Record<string, jest.Mock>;
 
   const normalUser = {
     id: 'user-1',
@@ -23,7 +26,6 @@ describe('AgentsService', () => {
     createdAt: new Date(),
     updatedAt: new Date(),
   };
-  const adminUser = { ...normalUser, id: 'admin-1', role: UserRole.ADMIN };
 
   const baseAgent: AgentConfig = {
     id: 'agent-1',
@@ -54,7 +56,29 @@ describe('AgentsService', () => {
     systemPrompt: '你是客服',
   };
 
+  const sseServer: McpServer = {
+    id: 'srv-1',
+    name: 'web-search',
+    type: McpServerType.SSE,
+    command: null,
+    args: null,
+    envEncrypted: null,
+    url: 'https://mcp.example.com/sse',
+    headersEncrypted: null,
+    description: null,
+    isActive: true,
+    creator: normalUser as never,
+    createdBy: 'user-1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
   beforeEach(async () => {
+    mcpServersService = {
+      findViewsByAgentConfig: jest.fn(),
+      validateForAssociation: jest.fn(),
+      toView: jest.fn((s: McpServer) => ({ id: s.id, name: s.name })),
+    };
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AgentsService,
@@ -67,6 +91,7 @@ describe('AgentsService', () => {
             findAndCount: jest.fn(),
           },
         },
+        { provide: McpServersService, useValue: mcpServersService },
         { provide: AGENT_ENCRYPTION_KEY, useValue: TEST_KEY },
       ],
     }).compile();
@@ -82,48 +107,20 @@ describe('AgentsService', () => {
       const saved = repo.save.mock.calls[0][0] as AgentConfig;
       expect(saved.apiKeyEncrypted).not.toContain(API_KEY);
       expect(decrypt(saved.apiKeyEncrypted, TEST_KEY)).toBe(API_KEY);
-      expect(saved.userId).toBe(normalUser.id);
       expect(result.apiKeyMasked).toBe('****3456');
       expect(result).not.toHaveProperty('apiKeyEncrypted');
       expect(result).not.toHaveProperty('userId');
     });
 
-    it('未传 enabledTools / mcpServers 时应该默认空数组', async () => {
+    it('未传 enabledTools 时应该默认空数组', async () => {
       await service.create(normalUser, createDto);
       const saved = repo.save.mock.calls[0][0] as AgentConfig;
       expect(saved.enabledTools).toEqual([]);
-      expect(saved.legacyMcpServers).toEqual([]);
     });
 
-    it('普通用户配置 stdio MCP 应该抛 403', async () => {
-      await expect(
-        service.create(normalUser, {
-          ...createDto,
-          mcpServers: [{ name: 'fs', transport: 'stdio', command: 'npx fs' }],
-        }),
-      ).rejects.toThrow(ForbiddenException);
-      await expect(
-        service.create(normalUser, {
-          ...createDto,
-          mcpServers: [{ name: 'fs', transport: 'stdio', command: 'npx fs' }],
-        }),
-      ).rejects.toThrow('仅管理员可配置 stdio 类型的 MCP Server');
-    });
-
-    it('管理员配置 stdio MCP 应该成功', async () => {
-      const result = await service.create(adminUser, {
-        ...createDto,
-        mcpServers: [{ name: 'fs', transport: 'stdio', command: 'npx fs' }],
-      });
-      expect(result.mcpServers).toHaveLength(1);
-    });
-
-    it('普通用户配置 sse MCP 应该成功', async () => {
-      const result = await service.create(normalUser, {
-        ...createDto,
-        mcpServers: [{ name: 'remote', transport: 'sse', url: 'https://mcp.example.com/sse' }],
-      });
-      expect(result.mcpServers).toHaveLength(1);
+    it('响应不应再包含 mcpServers 字段（已迁移到关联端点）', async () => {
+      const result = await service.create(normalUser, createDto);
+      expect(result).not.toHaveProperty('mcpServers');
     });
   });
 
@@ -133,28 +130,12 @@ describe('AgentsService', () => {
 
       const result = await service.findAll('user-1', { page: 1, limit: 10 });
 
-      expect(repo.findAndCount).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { userId: 'user-1', isActive: true },
-        }),
-      );
       expect(result).toMatchObject({ total: 1, page: 1, limit: 10, totalPages: 1 });
       expect(result.items[0].apiKeyMasked).toBe('****3456');
     });
   });
 
   describe('findOne', () => {
-    it('应该按 userId 隔离查询', async () => {
-      repo.findOne.mockResolvedValue(baseAgent);
-
-      const result = await service.findOne('user-1', 'agent-1');
-
-      expect(repo.findOne).toHaveBeenCalledWith({
-        where: { id: 'agent-1', userId: 'user-1' },
-      });
-      expect(result.id).toBe('agent-1');
-    });
-
     it('查不到（含他人的 Agent）应该抛 404', async () => {
       repo.findOne.mockResolvedValue(null);
       await expect(service.findOne('other-user', 'agent-1')).rejects.toThrow(NotFoundException);
@@ -173,15 +154,6 @@ describe('AgentsService', () => {
       saved = repo.save.mock.calls[1][0] as AgentConfig;
       expect(decrypt(saved.apiKeyEncrypted, TEST_KEY)).toBe('sk-new-key-9999');
     });
-
-    it('更新 stdio MCP 时普通用户应该抛 403', async () => {
-      repo.findOne.mockResolvedValue({ ...baseAgent });
-      await expect(
-        service.update(normalUser, 'agent-1', {
-          mcpServers: [{ name: 'fs', transport: 'stdio', command: 'npx fs' }],
-        }),
-      ).rejects.toThrow(ForbiddenException);
-    });
   });
 
   describe('remove', () => {
@@ -193,10 +165,45 @@ describe('AgentsService', () => {
       const saved = repo.save.mock.calls[0][0] as AgentConfig;
       expect(saved.isActive).toBe(false);
     });
+  });
 
-    it('他人的 Agent 删除时应该抛 404', async () => {
+  describe('getMcpServers', () => {
+    it('应该校验归属后返回关联的 MCP Server 视图', async () => {
+      repo.findOne.mockResolvedValue({ ...baseAgent });
+      mcpServersService.findViewsByAgentConfig.mockResolvedValue([{ id: 'srv-1' }]);
+
+      const result = await service.getMcpServers('user-1', 'agent-1');
+
+      expect(mcpServersService.findViewsByAgentConfig).toHaveBeenCalledWith('agent-1');
+      expect(result).toEqual([{ id: 'srv-1' }]);
+    });
+
+    it('他人的 Agent 应该抛 404', async () => {
       repo.findOne.mockResolvedValue(null);
-      await expect(service.remove('other-user', 'agent-1')).rejects.toThrow(NotFoundException);
+      await expect(service.getMcpServers('other-user', 'agent-1')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('updateMcpServers', () => {
+    it('应该校验后整体替换关联并返回视图列表', async () => {
+      repo.findOne.mockResolvedValue({ ...baseAgent });
+      mcpServersService.validateForAssociation.mockResolvedValue([sseServer]);
+
+      const result = await service.updateMcpServers(normalUser, 'agent-1', ['srv-1']);
+
+      expect(mcpServersService.validateForAssociation).toHaveBeenCalledWith(['srv-1'], normalUser);
+      const saved = repo.save.mock.calls[0][0] as AgentConfig;
+      expect(saved.mcpServers).toEqual([sseServer]);
+      expect(result).toEqual([{ id: 'srv-1', name: 'web-search' }]);
+    });
+
+    it('他人的 Agent 应该抛 404', async () => {
+      repo.findOne.mockResolvedValue(null);
+      await expect(service.updateMcpServers(normalUser, 'agent-1', [])).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 });

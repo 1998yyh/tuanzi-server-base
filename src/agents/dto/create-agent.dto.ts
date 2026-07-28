@@ -6,50 +6,12 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
-  IsUrl,
   Length,
   Max,
   Min,
-  ValidateIf,
-  ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ProviderType } from '../entities/agent-config.entity';
-
-export class McpServerDto {
-  @ApiProperty({ example: '文件系统', description: 'MCP Server 名称' })
-  @IsString()
-  @IsNotEmpty()
-  name: string;
-
-  @ApiProperty({
-    enum: ['stdio', 'sse'],
-    example: 'sse',
-    description:
-      '连接方式：stdio 在服务端执行子进程（仅管理员可配置），sse 连接已部署的 MCP Server',
-  })
-  @IsEnum(['stdio', 'sse'])
-  transport: 'stdio' | 'sse';
-
-  @ApiProperty({
-    required: false,
-    example: 'npx @modelcontextprotocol/server-filesystem /tmp',
-    description: 'stdio 模式必填：启动命令',
-  })
-  @ValidateIf((o: McpServerDto) => o.transport === 'stdio')
-  @IsString()
-  @IsNotEmpty({ message: 'stdio 模式必须提供 command' })
-  command?: string;
-
-  @ApiProperty({
-    required: false,
-    example: 'https://mcp.example.com/sse',
-    description: 'sse 模式必填：服务端 URL',
-  })
-  @ValidateIf((o: McpServerDto) => o.transport === 'sse')
-  @IsUrl({ require_tld: false }, { message: 'sse 模式必须提供合法的 url' })
-  url?: string;
-}
 
 export class CreateAgentDto {
   @ApiProperty({ example: '客服助手', description: 'Agent 名称' })
@@ -124,15 +86,4 @@ export class CreateAgentDto {
   @IsString({ each: true })
   @IsOptional()
   enabledTools?: string[];
-
-  @ApiProperty({
-    required: false,
-    type: [McpServerDto],
-    description: '挂载的 MCP Server 列表',
-  })
-  @IsArray()
-  @ValidateNested({ each: true })
-  @Type(() => McpServerDto)
-  @IsOptional()
-  mcpServers?: McpServerDto[];
 }
