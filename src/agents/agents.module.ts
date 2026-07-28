@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AgentConfig } from './entities/agent-config.entity';
 import { Conversation } from './entities/conversation.entity';
 import { Message } from './entities/message.entity';
@@ -15,18 +16,24 @@ import { TypeORMCheckpointer } from './checkpointers/typeorm.checkpointer';
 import { encryptionKeyProvider } from './utils/encryption-key.provider';
 import { McpServersModule } from '../mcp-servers/mcp-servers.module';
 import { SkillsModule } from '../skills/skills.module';
+import { DailyReportsModule } from '../daily-reports/daily-reports.module';
+import { ScheduledTask } from './scheduled-tasks/scheduled-task.entity';
+import { ScheduledTasksService } from './scheduled-tasks/scheduled-tasks.service';
 
 @Module({
   imports: [
+    ScheduleModule.forRoot(),
     TypeOrmModule.forFeature([
       AgentConfig,
       Conversation,
       Message,
       AgentCheckpoint,
       AgentCheckpointWrite,
+      ScheduledTask,
     ]),
     McpServersModule,
     SkillsModule,
+    DailyReportsModule,
   ],
   controllers: [AgentsController, ConversationsController],
   providers: [
@@ -35,6 +42,7 @@ import { SkillsModule } from '../skills/skills.module';
     AgentExecutorService,
     ToolRegistryService,
     TypeORMCheckpointer,
+    ScheduledTasksService,
     encryptionKeyProvider,
   ],
 })
