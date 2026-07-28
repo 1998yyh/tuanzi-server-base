@@ -10,7 +10,12 @@
 export const BUILTIN_TOOL_NAMES = ['web_search', 'calculator'] as const;
 
 /** Agent 作用域内置工具（按 agentConfigId 动态创建；第三期定时任务工具在此注册） */
-export const AGENT_SCOPED_TOOL_NAMES: readonly string[] = [];
+export const AGENT_SCOPED_TOOL_NAMES: readonly string[] = [
+  'create_scheduled_task',
+  'write_daily_report',
+  'list_scheduled_tasks',
+  'delete_scheduled_task',
+];
 
 /** 全部可启用的内置工具名（Skill.enabledTools 等校验用） */
 export const ALL_BUILTIN_TOOL_NAMES: readonly string[] = [

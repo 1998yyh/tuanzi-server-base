@@ -100,6 +100,36 @@ describe('ToolRegistryService', () => {
         expect.arrayContaining(['web_search', 'calculator']),
       );
     });
+
+    it('registerAgentScopedTool 注册的工具应该按 agentConfigId 动态创建', async () => {
+      const scopedTool = { name: 'list_scheduled_tasks', invoke: jest.fn() };
+      const factory = jest.fn().mockReturnValue(scopedTool);
+      service.registerAgentScopedTool('list_scheduled_tasks', factory);
+
+      const tools = await service.getToolsForAgent(
+        buildAgent({ enabledTools: ['list_scheduled_tasks'] }),
+      );
+
+      expect(factory).toHaveBeenCalledWith('agent-1');
+      expect(tools).toEqual([scopedTool]);
+    });
+
+    it('listBuiltinToolNames 应该包含 Agent 作用域工具名', () => {
+      service.registerAgentScopedTool('write_daily_report', () => ({}) as never);
+
+      expect(service.listBuiltinToolNames()).toEqual(
+        expect.arrayContaining(['web_search', 'calculator', 'write_daily_report']),
+      );
+    });
+
+    it('未注册的工具名应该跳过并警告，不影响其他工具', async () => {
+      const tools = await service.getToolsForAgent(
+        buildAgent({ enabledTools: ['calculator', 'nonexistent'] }),
+      );
+
+      expect(tools).toHaveLength(1);
+      expect(tools[0].name).toBe('calculator');
+    });
   });
 
   describe('MCP 工具', () => {

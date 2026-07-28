@@ -26,6 +26,11 @@ import { CalculatorTool } from './builtin/calculator.tool';
 export class ToolRegistryService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ToolRegistryService.name);
   private readonly builtinTools = new Map<string, StructuredToolInterface>();
+  /** Agent 作用域工具工厂：按 agentConfigId 动态创建工具实例（如定时任务工具） */
+  private readonly agentScopedToolFactories = new Map<
+    string,
+    (agentConfigId: string) => StructuredToolInterface
+  >();
   private readonly mcpClients = new Map<string, Client>();
 
   constructor(private readonly config: ConfigService) {}
@@ -47,9 +52,21 @@ export class ToolRegistryService implements OnModuleInit, OnModuleDestroy {
     this.mcpClients.clear();
   }
 
-  /** 返回全部内置工具名，供前端展示可选列表 */
+  /** 返回全部内置工具名（含 Agent 作用域工具），供前端展示可选列表 */
   listBuiltinToolNames(): string[] {
-    return [...this.builtinTools.keys()];
+    return [...this.builtinTools.keys(), ...this.agentScopedToolFactories.keys()];
+  }
+
+  /**
+   * 注册 Agent 作用域工具：工具 func 需要知道当前 Agent 身份（如定时任务归属），
+   * 故以工厂形式注册，getToolsForAgent 时按 config.id 创建实例。
+   * 由 ScheduledTasksService.onModuleInit 调用（反向注入会破坏模块依赖方向）。
+   */
+  registerAgentScopedTool(
+    name: string,
+    factory: (agentConfigId: string) => StructuredToolInterface,
+  ): void {
+    this.agentScopedToolFactories.set(name, factory);
   }
 
   async getToolsForAgent(
@@ -62,9 +79,14 @@ export class ToolRegistryService implements OnModuleInit, OnModuleDestroy {
       const tool = this.builtinTools.get(name);
       if (tool) {
         tools.push(tool);
-      } else {
-        this.logger.warn(`Agent "${config.name}" 启用了不存在的内置工具: ${name}`);
+        continue;
       }
+      const factory = this.agentScopedToolFactories.get(name);
+      if (factory) {
+        tools.push(factory(config.id));
+        continue;
+      }
+      this.logger.warn(`Agent "${config.name}" 启用了不存在的内置工具: ${name}`);
     }
 
     for (const server of mcpServers) {
