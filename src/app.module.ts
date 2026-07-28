@@ -6,6 +6,7 @@ import { UsersModule } from './users/users.module';
 import { DailyReportsModule } from './daily-reports/daily-reports.module';
 import { AgentsModule } from './agents/agents.module';
 import { McpServersModule } from './mcp-servers/mcp-servers.module';
+import { SkillsModule } from './skills/skills.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { McpServersModule } from './mcp-servers/mcp-servers.module';
     DailyReportsModule,
     AgentsModule,
     McpServersModule,
+    SkillsModule,
   ],
 })
 export class AppModule {}
