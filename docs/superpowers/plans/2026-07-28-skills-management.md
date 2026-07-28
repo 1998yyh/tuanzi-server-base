@@ -961,18 +961,6 @@ git commit -m "feat(skills): 新增 Skill REST API"
       expect(toolRegistry.getToolsForAgent).not.toHaveBeenCalled();
       expect(mockBindTools).toHaveBeenCalledWith([calculatorTool]);
     });
-
-    it('isSkillExecution=true 时 getAllTools 应该收到防递归标志', async () => {
-      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
-      const spy = jest.spyOn(
-        service as unknown as { getAllTools: (c: unknown, f?: boolean) => Promise<unknown[]> },
-        'getAllTools',
-      );
-
-      await service.runBatch(buildAgent(), '执行任务', { isSkillExecution: true });
-
-      expect(spy).toHaveBeenCalledWith(expect.anything(), true);
-    });
   });
 ```
 
@@ -1013,21 +1001,7 @@ export interface BatchRunOptions {
     return graph.compile(useCheckpointer ? { checkpointer: this.checkpointer } : {});
 ```
 
-**3c.** `getAllTools` 加第二参：
-
-```typescript
-  /** 汇总内置工具 + 全局 MCP Server 工具（从 mcp_servers 表加载并解密后建连） */
-  private async getAllTools(
-    config: AgentConfig,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    isSkillExecution = false,
-  ): Promise<StructuredToolInterface[]> {
-    const mcpServers = await this.mcpServersService.findByAgentConfig(config.id);
-    return this.toolRegistry.getToolsForAgent(config, mcpServers);
-  }
-```
-
-（`isSkillExecution` 参数本任务仅占位透传，Task 4 接入 Skill 注入后移除 eslint 注释。）
+**3c.** `run`/`runStream` 内对 `buildGraph` 的现有调用（两参）不必改——第三参默认 `true`。`getAllTools` 本任务保持不变（防递归参数在 Task 4 接入）。
 
 **3d.** 在 `runStream` 方法后追加 `runBatch`：
 
@@ -1052,9 +1026,7 @@ export interface BatchRunOptions {
       return this.run(agentConfig, options.threadId, userMessage);
     }
 
-    const tools =
-      options.overrideTools ??
-      (await this.getAllTools(agentConfig, options.isSkillExecution ?? false));
+    const tools = options.overrideTools ?? (await this.getAllTools(agentConfig));
     const graph = this.buildGraph(
       { ...agentConfig, systemPrompt: options.overrideSystemPrompt ?? agentConfig.systemPrompt },
       tools,
@@ -1556,7 +1528,7 @@ import { SkillToolFactory } from '../skills/skill-tool.factory';
 import { Skill } from '../skills/skill.entity';
 ```
 - constructor 末尾追加参数：`private readonly skillToolFactory: SkillToolFactory,`
-- `getAllTools` 全量替换为（移除 Task 3 的 eslint 占位注释）：
+- `getAllTools` 全量替换为：
 
 ```typescript
   /**
@@ -1592,6 +1564,14 @@ import { Skill } from '../skills/skill.entity';
       mcpRuntime,
     );
   }
+```
+
+- 同时把 `runBatch` 中 `const tools = options.overrideTools ?? (await this.getAllTools(agentConfig));` 改为：
+
+```typescript
+    const tools =
+      options.overrideTools ??
+      (await this.getAllTools(agentConfig, options.isSkillExecution ?? false));
 ```
 
 **3g. 修改 `src/agents/agents.module.ts`：** imports 数组加 `SkillsModule`，import 加 `import { SkillsModule } from '../skills/skills.module';`。
