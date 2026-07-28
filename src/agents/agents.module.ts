@@ -13,6 +13,7 @@ import { AgentExecutorService } from './agent-executor.service';
 import { ToolRegistryService } from './tools/tool-registry.service';
 import { TypeORMCheckpointer } from './checkpointers/typeorm.checkpointer';
 import { encryptionKeyProvider } from './utils/encryption-key.provider';
+import { McpServersModule } from '../mcp-servers/mcp-servers.module';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { encryptionKeyProvider } from './utils/encryption-key.provider';
       AgentCheckpoint,
       AgentCheckpointWrite,
     ]),
+    McpServersModule,
   ],
   controllers: [AgentsController, ConversationsController],
   providers: [

@@ -16,6 +16,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { AgentConfig, ProviderType } from './entities/agent-config.entity';
 import { MessageRole } from './entities/message.entity';
 import { ToolRegistryService } from './tools/tool-registry.service';
+import { McpServersService } from '../mcp-servers/mcp-servers.service';
 import { TypeORMCheckpointer } from './checkpointers/typeorm.checkpointer';
 import { AGENT_ENCRYPTION_KEY } from './utils/encryption-key.provider';
 import { decrypt } from './utils/crypto.util';
@@ -64,6 +65,7 @@ export class AgentExecutorService {
     private readonly checkpointer: TypeORMCheckpointer,
     @Inject(AGENT_ENCRYPTION_KEY)
     private readonly encryptionKey: string,
+    private readonly mcpServersService: McpServersService,
   ) {}
 
   /**
@@ -74,7 +76,7 @@ export class AgentExecutorService {
     conversationId: string,
     userMessage: string,
   ): Promise<NewMessageData[]> {
-    const tools = await this.toolRegistry.getToolsForAgent(agentConfig);
+    const tools = await this.getAllTools(agentConfig);
     const graph = this.buildGraph(agentConfig, tools);
     const config = { configurable: { thread_id: conversationId } };
 
@@ -114,7 +116,7 @@ export class AgentExecutorService {
     conversationId: string,
     userMessage: string,
   ): AsyncGenerator<SseEvent> {
-    const tools = await this.toolRegistry.getToolsForAgent(agentConfig);
+    const tools = await this.getAllTools(agentConfig);
     const graph = this.buildGraph(agentConfig, tools);
 
     const stream = graph.streamEvents(
@@ -144,6 +146,12 @@ export class AgentExecutorService {
       }
       yield sseEvent;
     }
+  }
+
+  /** 汇总内置工具 + 全局 MCP Server 工具（从 mcp_servers 表加载并解密后建连） */
+  private async getAllTools(config: AgentConfig): Promise<StructuredToolInterface[]> {
+    const mcpServers = await this.mcpServersService.findByAgentConfig(config.id);
+    return this.toolRegistry.getToolsForAgent(config, mcpServers);
   }
 
   private buildGraph(config: AgentConfig, tools: StructuredToolInterface[]) {

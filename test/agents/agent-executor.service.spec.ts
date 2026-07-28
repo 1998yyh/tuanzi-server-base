@@ -4,6 +4,7 @@ import { AIMessage } from '@langchain/core/messages';
 import { StructuredToolInterface } from '@langchain/core/tools';
 import { AgentExecutorService } from 'src/agents/agent-executor.service';
 import { ToolRegistryService } from 'src/agents/tools/tool-registry.service';
+import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
 import { TypeORMCheckpointer } from 'src/agents/checkpointers/typeorm.checkpointer';
 import { AGENT_ENCRYPTION_KEY } from 'src/agents/utils/encryption-key.provider';
 import { encrypt } from 'src/agents/utils/crypto.util';
@@ -34,6 +35,7 @@ const API_KEY = 'sk-test-key-123456';
 describe('AgentExecutorService', () => {
   let service: AgentExecutorService;
   let toolRegistry: { getToolsForAgent: jest.Mock };
+  let mcpServersService: { findByAgentConfig: jest.Mock };
 
   const buildAgent = (override: Partial<AgentConfig> = {}): AgentConfig =>
     ({
@@ -47,7 +49,6 @@ describe('AgentExecutorService', () => {
       maxTokens: 4096,
       maxIterations: 10,
       enabledTools: [],
-      mcpServers: [],
       isActive: true,
       ...override,
     }) as AgentConfig;
@@ -60,12 +61,14 @@ describe('AgentExecutorService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     toolRegistry = { getToolsForAgent: jest.fn().mockResolvedValue([]) };
+    mcpServersService = { findByAgentConfig: jest.fn().mockResolvedValue([]) };
     mockBindTools.mockImplementation(() => ({ invoke: mockInvoke }));
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AgentExecutorService,
         { provide: ToolRegistryService, useValue: toolRegistry },
+        { provide: McpServersService, useValue: mcpServersService },
         // 用真实 MemorySaver 替代 TypeORMCheckpointer，让图状态流转真实发生
         {
           provide: TypeORMCheckpointer,
@@ -241,6 +244,19 @@ describe('AgentExecutorService', () => {
       }[];
       expect(inputMessages[0]._getType()).toBe('system');
       expect(inputMessages[0].content).toBe('你是专业客服');
+    });
+
+    it('应该从 McpServersService 加载 MCP 工具并传给 ToolRegistry', async () => {
+      const runtimeServer = { name: '远程工具', type: 'sse', url: 'https://mcp.example.com/sse' };
+      mcpServersService.findByAgentConfig.mockResolvedValue([runtimeServer]);
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(buildAgent(), 'conv-1', '你好');
+
+      expect(mcpServersService.findByAgentConfig).toHaveBeenCalledWith('agent-1');
+      expect(toolRegistry.getToolsForAgent).toHaveBeenCalledWith(expect.anything(), [
+        runtimeServer,
+      ]);
     });
   });
 

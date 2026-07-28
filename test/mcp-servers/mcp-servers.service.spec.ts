@@ -56,8 +56,10 @@ describe('McpServersService', () => {
             create: jest.fn((v) => v),
             save: jest.fn(async (v) => v),
             findOne: jest.fn(),
+            find: jest.fn(),
             findAndCount: jest.fn(),
             remove: jest.fn(async (v) => v),
+            createQueryBuilder: jest.fn(),
           },
         },
         { provide: AGENT_ENCRYPTION_KEY, useValue: TEST_KEY },
@@ -239,6 +241,81 @@ describe('McpServersService', () => {
         args: ['-y', 'server-fs'],
         env: { ROOT: '/tmp' },
       });
+    });
+  });
+
+  describe('findByAgentConfig', () => {
+    it('应通过关联表查询，过滤停用 server，并解密 env', async () => {
+      const { encrypt } = jest.requireActual(
+        'src/agents/utils/crypto.util',
+      ) as typeof import('src/agents/utils/crypto.util');
+      const activeStdio: McpServer = {
+        ...sseServer,
+        id: 'srv-stdio',
+        type: McpServerType.STDIO,
+        command: 'npx',
+        args: null,
+        url: null,
+        envEncrypted: encrypt(JSON.stringify({ ROOT: '/tmp' }), TEST_KEY),
+      };
+      const inactive: McpServer = { ...sseServer, id: 'srv-off', isActive: false };
+      const qb = {
+        innerJoin: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue([activeStdio, inactive]),
+      };
+      (repo.createQueryBuilder as jest.Mock).mockReturnValue(qb);
+
+      const result = await service.findByAgentConfig('agent-1');
+
+      expect(qb.innerJoin).toHaveBeenCalledWith(
+        'agent_config_mcp_servers',
+        'j',
+        'j.mcp_server_id = m.id',
+      );
+      expect(qb.where).toHaveBeenCalledWith('j.agent_config_id = :agentConfigId', {
+        agentConfigId: 'agent-1',
+      });
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        name: 'web-search',
+        type: McpServerType.STDIO,
+        command: 'npx',
+        env: { ROOT: '/tmp' },
+      });
+    });
+  });
+
+  describe('validateForAssociation', () => {
+    it('任一 id 不存在应抛 404', async () => {
+      repo.find.mockResolvedValue([{ ...sseServer }]);
+
+      await expect(service.validateForAssociation(['srv-1', 'srv-x'], normalUser)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('包含已停用 server 应抛 400', async () => {
+      repo.find.mockResolvedValue([{ ...sseServer, isActive: false }]);
+
+      await expect(service.validateForAssociation(['srv-1'], normalUser)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('普通用户关联 stdio 类型应抛 403，管理员可以', async () => {
+      const stdioServer: McpServer = { ...sseServer, type: McpServerType.STDIO, command: 'npx' };
+      repo.find.mockResolvedValue([stdioServer]);
+
+      await expect(service.validateForAssociation(['srv-1'], normalUser)).rejects.toThrow(
+        ForbiddenException,
+      );
+      await expect(service.validateForAssociation(['srv-1'], adminUser)).resolves.toHaveLength(1);
+    });
+
+    it('空数组直接返回空，不查库', async () => {
+      await expect(service.validateForAssociation([], normalUser)).resolves.toEqual([]);
+      expect(repo.find).not.toHaveBeenCalled();
     });
   });
 });

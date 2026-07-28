@@ -32,14 +32,14 @@ export class AgentsService {
   async create(user: CurrentUser, dto: CreateAgentDto): Promise<AgentResponseDto> {
     this.assertStdioPermission(user, dto.mcpServers);
 
-    const { apiKey, ...rest } = dto;
+    const { apiKey, mcpServers, ...rest } = dto;
     const agent = await this.agentRepo.save(
       this.agentRepo.create({
         ...rest,
         userId: user.id,
         apiKeyEncrypted: encrypt(apiKey, this.encryptionKey),
         enabledTools: dto.enabledTools ?? [],
-        mcpServers: dto.mcpServers ?? [],
+        legacyMcpServers: mcpServers ?? [],
       }),
     );
     return this.toResponse(agent);
@@ -71,8 +71,11 @@ export class AgentsService {
     const agent = await this.findOwnedOrFail(user.id, id);
     this.assertStdioPermission(user, dto.mcpServers);
 
-    const { apiKey, ...rest } = dto;
+    const { apiKey, mcpServers, ...rest } = dto;
     Object.assign(agent, rest);
+    if (mcpServers !== undefined) {
+      agent.legacyMcpServers = mcpServers;
+    }
     if (apiKey) {
       agent.apiKeyEncrypted = encrypt(apiKey, this.encryptionKey);
     }
@@ -116,7 +119,7 @@ export class AgentsService {
       maxTokens: agent.maxTokens,
       maxIterations: agent.maxIterations,
       enabledTools: agent.enabledTools ?? [],
-      mcpServers: agent.mcpServers ?? [],
+      mcpServers: agent.legacyMcpServers ?? [],
       isActive: agent.isActive,
       createdAt: agent.createdAt,
       updatedAt: agent.updatedAt,

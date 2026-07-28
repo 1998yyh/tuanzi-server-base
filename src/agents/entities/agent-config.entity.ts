@@ -6,9 +6,12 @@ import {
   UpdateDateColumn,
   ManyToOne,
   OneToMany,
+  ManyToMany,
   JoinColumn,
+  JoinTable,
 } from 'typeorm';
 import { User } from '../../users/users.entity';
+import { McpServer } from '../../mcp-servers/mcp-server.entity';
 import { Conversation } from './conversation.entity';
 
 /** LLM 供应商：扩展时在此添加，AgentExecutorService.createModelFromConfig 的 switch 分支同步更新 */
@@ -18,7 +21,7 @@ export enum ProviderType {
   DEEPSEEK = 'deepseek',
 }
 
-/** MCP Server 配置。stdio 模式会在服务端执行子进程，仅管理员可配置 */
+/** @deprecated 旧 JSON 内联配置，已迁移到 mcp_servers 表；仅 legacyMcpServers 字段使用 */
 export interface McpServerConfig {
   name: string;
   transport: 'stdio' | 'sse';
@@ -66,9 +69,21 @@ export class AgentConfig {
   @Column({ name: 'max_iterations', default: 10 })
   maxIterations: number;
 
-  /** MySQL JSON 列不支持字面默认值，用 nullable 代替，读取处 ?? [] */
+  /**
+   * @deprecated 旧 JSON 内联 MCP 配置，已迁移到 mcp_servers + agent_config_mcp_servers。
+   * 保留列待数据迁移完成后删除；代码不再读写。
+   */
   @Column({ name: 'mcp_servers', type: 'json', nullable: true })
-  mcpServers: McpServerConfig[] | null;
+  legacyMcpServers: McpServerConfig[] | null;
+
+  /** 关联的全局 MCP Server（agent_config_mcp_servers 关联表） */
+  @ManyToMany(() => McpServer)
+  @JoinTable({
+    name: 'agent_config_mcp_servers',
+    joinColumn: { name: 'agent_config_id', referencedColumnName: 'id' },
+    inverseJoinColumn: { name: 'mcp_server_id', referencedColumnName: 'id' },
+  })
+  mcpServers: McpServer[];
 
   /** 启用的内置工具名列表 */
   @Column({ name: 'enabled_tools', type: 'json', nullable: true })

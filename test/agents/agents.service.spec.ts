@@ -38,6 +38,7 @@ describe('AgentsService', () => {
     maxTokens: 4096,
     maxIterations: 10,
     enabledTools: ['web_search'],
+    legacyMcpServers: null,
     mcpServers: [],
     isActive: true,
     conversations: [],
@@ -91,7 +92,7 @@ describe('AgentsService', () => {
       await service.create(normalUser, createDto);
       const saved = repo.save.mock.calls[0][0] as AgentConfig;
       expect(saved.enabledTools).toEqual([]);
-      expect(saved.mcpServers).toEqual([]);
+      expect(saved.legacyMcpServers).toEqual([]);
     });
 
     it('普通用户配置 stdio MCP 应该抛 403', async () => {

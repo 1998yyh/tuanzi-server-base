@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { User, UserRole } from '../users/users.entity';
 import {
   McpServer,
@@ -167,6 +167,48 @@ export class McpServersService {
       url: server.url ?? undefined,
       headers: server.headersEncrypted ? this.decryptJson(server.headersEncrypted) : undefined,
     };
+  }
+
+  /** 执行用：Agent 关联的启用中 MCP Server（env/headers 已解密） */
+  async findByAgentConfig(agentConfigId: string): Promise<McpServerRuntimeConfig[]> {
+    const servers = await this.findEntitiesByAgentConfig(agentConfigId);
+    return servers.filter((s) => s.isActive).map((s) => this.toRuntimeConfig(s));
+  }
+
+  /** 展示用：Agent 关联的 MCP Server 脱敏视图 */
+  async findViewsByAgentConfig(agentConfigId: string): Promise<McpServerView[]> {
+    const servers = await this.findEntitiesByAgentConfig(agentConfigId);
+    return servers.map((s) => this.toView(s));
+  }
+
+  /**
+   * Agent 关联前校验：全部存在且启用中；stdio 类型仅 admin 可关联。
+   * 校验通过返回实体列表，供调用方直接写关联。
+   */
+  async validateForAssociation(ids: string[], user: CurrentUser): Promise<McpServer[]> {
+    if (!ids.length) return [];
+    const servers = await this.mcpServerRepo.find({ where: { id: In(ids) } });
+    const foundIds = new Set(servers.map((s) => s.id));
+    const missing = ids.find((id) => !foundIds.has(id));
+    if (missing) {
+      throw new NotFoundException(`MCP Server #${missing} 不存在`);
+    }
+    const inactive = servers.find((s) => !s.isActive);
+    if (inactive) {
+      throw new BadRequestException(`MCP Server "${inactive.name}" 已停用，无法关联`);
+    }
+    if (user.role !== UserRole.ADMIN && servers.some((s) => s.type === McpServerType.STDIO)) {
+      throw new ForbiddenException('仅管理员可为 Agent 关联 stdio 类型的 MCP Server');
+    }
+    return servers;
+  }
+
+  private findEntitiesByAgentConfig(agentConfigId: string): Promise<McpServer[]> {
+    return this.mcpServerRepo
+      .createQueryBuilder('m')
+      .innerJoin('agent_config_mcp_servers', 'j', 'j.mcp_server_id = m.id')
+      .where('j.agent_config_id = :agentConfigId', { agentConfigId })
+      .getMany();
   }
 
   private async findOrFail(id: string): Promise<McpServer> {
