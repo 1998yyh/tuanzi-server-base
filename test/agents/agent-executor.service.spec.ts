@@ -5,6 +5,7 @@ import { StructuredToolInterface } from '@langchain/core/tools';
 import { AgentExecutorService } from 'src/agents/agent-executor.service';
 import { ToolRegistryService } from 'src/agents/tools/tool-registry.service';
 import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
+import { SkillToolFactory } from 'src/skills/skill-tool.factory';
 import { TypeORMCheckpointer } from 'src/agents/checkpointers/typeorm.checkpointer';
 import { AGENT_ENCRYPTION_KEY } from 'src/agents/utils/encryption-key.provider';
 import { encrypt } from 'src/agents/utils/crypto.util';
@@ -36,6 +37,7 @@ describe('AgentExecutorService', () => {
   let service: AgentExecutorService;
   let toolRegistry: { getToolsForAgent: jest.Mock };
   let mcpServersService: { findByAgentConfig: jest.Mock };
+  let skillToolFactory: { createToolsForAgent: jest.Mock };
 
   const buildAgent = (override: Partial<AgentConfig> = {}): AgentConfig =>
     ({
@@ -62,6 +64,7 @@ describe('AgentExecutorService', () => {
     jest.clearAllMocks();
     toolRegistry = { getToolsForAgent: jest.fn().mockResolvedValue([]) };
     mcpServersService = { findByAgentConfig: jest.fn().mockResolvedValue([]) };
+    skillToolFactory = { createToolsForAgent: jest.fn().mockResolvedValue([]) };
     mockBindTools.mockImplementation(() => ({ invoke: mockInvoke }));
 
     const module: TestingModule = await Test.createTestingModule({
@@ -69,6 +72,7 @@ describe('AgentExecutorService', () => {
         AgentExecutorService,
         { provide: ToolRegistryService, useValue: toolRegistry },
         { provide: McpServersService, useValue: mcpServersService },
+        { provide: SkillToolFactory, useValue: skillToolFactory },
         // 用真实 MemorySaver 替代 TypeORMCheckpointer，让图状态流转真实发生
         {
           provide: TypeORMCheckpointer,
@@ -257,6 +261,31 @@ describe('AgentExecutorService', () => {
       expect(toolRegistry.getToolsForAgent).toHaveBeenCalledWith(expect.anything(), [
         runtimeServer,
       ]);
+    });
+
+    it('正常执行应该把 Skill 工具追加进工具列表', async () => {
+      const skillTool = { name: 'generate_ai_report', invoke: jest.fn() };
+      skillToolFactory.createToolsForAgent.mockResolvedValue([skillTool]);
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(buildAgent(), 'conv-1', '你好');
+
+      expect(skillToolFactory.createToolsForAgent).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          runBatch: expect.any(Function),
+          buildSubTools: expect.any(Function),
+        }),
+      );
+      expect(mockBindTools).toHaveBeenCalledWith([skillTool]);
+    });
+
+    it('isSkillExecution=true 时不应该注入 Skill 工具（防递归）', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.runBatch(buildAgent(), '执行任务', { isSkillExecution: true });
+
+      expect(skillToolFactory.createToolsForAgent).not.toHaveBeenCalled();
     });
   });
 

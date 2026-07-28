@@ -104,6 +104,17 @@ export class SkillsService {
       .getMany();
   }
 
+  /** 展示用：Agent 关联的 Skill 视图（含已停用的，便于管理界面展示） */
+  async findViewsByAgentConfig(agentConfigId: string): Promise<SkillView[]> {
+    const skills = await this.skillRepo
+      .createQueryBuilder('s')
+      .innerJoin('agent_config_skills', 'j', 'j.skill_id = s.id')
+      .leftJoinAndSelect('s.mcpServers', 'm')
+      .where('j.agent_config_id = :agentConfigId', { agentConfigId })
+      .getMany();
+    return skills.map((s) => this.toView(s));
+  }
+
   /** Agent 关联前校验：全部存在且启用中；返回实体列表供写关联 */
   async validateForAssociation(ids: string[]): Promise<Skill[]> {
     if (!ids.length) return [];

@@ -5,6 +5,7 @@ import { NotFoundException } from '@nestjs/common';
 import { AgentsService } from 'src/agents/agents.service';
 import { AgentConfig, ProviderType } from 'src/agents/entities/agent-config.entity';
 import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
+import { SkillsService } from 'src/skills/skills.service';
 import { McpServer, McpServerType } from 'src/mcp-servers/mcp-server.entity';
 import { AGENT_ENCRYPTION_KEY } from 'src/agents/utils/encryption-key.provider';
 import { decrypt, encrypt } from 'src/agents/utils/crypto.util';
@@ -17,6 +18,7 @@ describe('AgentsService', () => {
   let service: AgentsService;
   let repo: jest.Mocked<Repository<AgentConfig>>;
   let mcpServersService: Record<string, jest.Mock>;
+  let skillsService: Record<string, jest.Mock>;
 
   const normalUser = {
     id: 'user-1',
@@ -42,6 +44,7 @@ describe('AgentsService', () => {
     enabledTools: ['web_search'],
     legacyMcpServers: null,
     mcpServers: [],
+    skills: [],
     isActive: true,
     conversations: [],
     createdAt: new Date(),
@@ -74,6 +77,11 @@ describe('AgentsService', () => {
   };
 
   beforeEach(async () => {
+    skillsService = {
+      findViewsByAgentConfig: jest.fn(),
+      validateForAssociation: jest.fn(),
+      toView: jest.fn((s: { id: string; name: string }) => ({ id: s.id, name: s.name })),
+    };
     mcpServersService = {
       findViewsByAgentConfig: jest.fn(),
       validateForAssociation: jest.fn(),
@@ -92,6 +100,7 @@ describe('AgentsService', () => {
           },
         },
         { provide: McpServersService, useValue: mcpServersService },
+        { provide: SkillsService, useValue: skillsService },
         { provide: AGENT_ENCRYPTION_KEY, useValue: TEST_KEY },
       ],
     }).compile();
@@ -204,6 +213,33 @@ describe('AgentsService', () => {
       await expect(service.updateMcpServers(normalUser, 'agent-1', [])).rejects.toThrow(
         NotFoundException,
       );
+    });
+  });
+
+  describe('updateSkills', () => {
+    it('应该校验后整体替换关联并返回视图列表', async () => {
+      repo.findOne.mockResolvedValue({ ...baseAgent });
+      const skill = { id: 'skill-1', name: 'generate_ai_report' };
+      skillsService.validateForAssociation.mockResolvedValue([skill]);
+
+      const result = await service.updateSkills(normalUser, 'agent-1', ['skill-1']);
+
+      expect(skillsService.validateForAssociation).toHaveBeenCalledWith(['skill-1']);
+      const saved = repo.save.mock.calls[0][0] as AgentConfig;
+      expect(saved.skills).toEqual([skill]);
+      expect(result).toEqual([{ id: 'skill-1', name: 'generate_ai_report' }]);
+    });
+  });
+
+  describe('getSkills', () => {
+    it('应该校验归属后返回关联的 Skill 视图', async () => {
+      repo.findOne.mockResolvedValue({ ...baseAgent });
+      skillsService.findViewsByAgentConfig.mockResolvedValue([{ id: 'skill-1' }]);
+
+      const result = await service.getSkills('user-1', 'agent-1');
+
+      expect(skillsService.findViewsByAgentConfig).toHaveBeenCalledWith('agent-1');
+      expect(result).toEqual([{ id: 'skill-1' }]);
     });
   });
 });

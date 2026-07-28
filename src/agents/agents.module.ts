@@ -14,6 +14,7 @@ import { ToolRegistryService } from './tools/tool-registry.service';
 import { TypeORMCheckpointer } from './checkpointers/typeorm.checkpointer';
 import { encryptionKeyProvider } from './utils/encryption-key.provider';
 import { McpServersModule } from '../mcp-servers/mcp-servers.module';
+import { SkillsModule } from '../skills/skills.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { McpServersModule } from '../mcp-servers/mcp-servers.module';
       AgentCheckpointWrite,
     ]),
     McpServersModule,
+    SkillsModule,
   ],
   controllers: [AgentsController, ConversationsController],
   providers: [

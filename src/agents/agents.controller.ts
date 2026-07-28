@@ -23,6 +23,7 @@ import { UpdateAgentDto } from './dto/update-agent.dto';
 import { QueryAgentsDto } from './dto/query-agents.dto';
 import { AgentResponseDto } from './dto/agent-response.dto';
 import { UpdateAgentMcpServersDto } from './dto/update-agent-mcp-servers.dto';
+import { UpdateAgentSkillsDto } from './dto/update-agent-skills.dto';
 
 @ApiTags('Agent')
 @ApiBearerAuth()
@@ -112,5 +113,28 @@ export class AgentsController {
     @Body() dto: UpdateAgentMcpServersDto,
   ) {
     return this.agentsService.updateMcpServers(user, id, dto.mcpServerIds);
+  }
+
+  @Get(':id/skills')
+  @ApiOperation({ summary: 'Agent 已关联的 Skill 列表' })
+  @ApiResponse({ status: 200, description: '获取成功' })
+  @ApiResponse({ status: 404, description: 'Agent 不存在' })
+  async getSkills(
+    @CurrentUser() user: Omit<User, 'password'>,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.agentsService.getSkills(user.id, id);
+  }
+
+  @Put(':id/skills')
+  @ApiOperation({ summary: '整体替换 Agent 关联的 Skill', description: '传空数组清空关联' })
+  @ApiResponse({ status: 200, description: '更新成功' })
+  @ApiResponse({ status: 404, description: 'Agent 或 Skill 不存在' })
+  async updateSkills(
+    @CurrentUser() user: Omit<User, 'password'>,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateAgentSkillsDto,
+  ) {
+    return this.agentsService.updateSkills(user, id, dto.skillIds);
   }
 }

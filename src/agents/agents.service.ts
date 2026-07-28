@@ -5,6 +5,8 @@ import { User } from '../users/users.entity';
 import { AgentConfig } from './entities/agent-config.entity';
 import { McpServersService } from '../mcp-servers/mcp-servers.service';
 import { McpServerView } from '../mcp-servers/mcp-server.entity';
+import { SkillsService } from '../skills/skills.service';
+import { SkillView } from '../skills/skill.entity';
 import { CreateAgentDto } from './dto/create-agent.dto';
 import { UpdateAgentDto } from './dto/update-agent.dto';
 import { QueryAgentsDto } from './dto/query-agents.dto';
@@ -29,6 +31,7 @@ export class AgentsService {
     @Inject(AGENT_ENCRYPTION_KEY)
     private readonly encryptionKey: string,
     private readonly mcpServersService: McpServersService,
+    private readonly skillsService: SkillsService,
   ) {}
 
   async create(user: CurrentUser, dto: CreateAgentDto): Promise<AgentResponseDto> {
@@ -102,6 +105,21 @@ export class AgentsService {
     agent.mcpServers = servers;
     await this.agentRepo.save(agent);
     return servers.map((s) => this.mcpServersService.toView(s));
+  }
+
+  /** Agent 已关联的 Skill 列表 */
+  async getSkills(userId: string, agentId: string): Promise<SkillView[]> {
+    await this.findOwnedOrFail(userId, agentId);
+    return this.skillsService.findViewsByAgentConfig(agentId);
+  }
+
+  /** 整体替换 Agent 的 Skill 关联 */
+  async updateSkills(user: CurrentUser, agentId: string, skillIds: string[]): Promise<SkillView[]> {
+    const agent = await this.findOwnedOrFail(user.id, agentId);
+    const skills = await this.skillsService.validateForAssociation(skillIds);
+    agent.skills = skills;
+    await this.agentRepo.save(agent);
+    return skills.map((s) => this.skillsService.toView(s));
   }
 
   private async findOwnedOrFail(userId: string, id: string): Promise<AgentConfig> {

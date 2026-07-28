@@ -12,6 +12,7 @@ import {
 } from 'typeorm';
 import { User } from '../../users/users.entity';
 import { McpServer } from '../../mcp-servers/mcp-server.entity';
+import { Skill } from '../../skills/skill.entity';
 import { Conversation } from './conversation.entity';
 
 /** LLM 供应商：扩展时在此添加，AgentExecutorService.createModelFromConfig 的 switch 分支同步更新 */
@@ -84,6 +85,15 @@ export class AgentConfig {
     inverseJoinColumn: { name: 'mcp_server_id', referencedColumnName: 'id' },
   })
   mcpServers: McpServer[];
+
+  /** 关联的 Skill（agent_config_skills 关联表） */
+  @ManyToMany(() => Skill)
+  @JoinTable({
+    name: 'agent_config_skills',
+    joinColumn: { name: 'agent_config_id', referencedColumnName: 'id' },
+    inverseJoinColumn: { name: 'skill_id', referencedColumnName: 'id' },
+  })
+  skills: Skill[];
 
   /** 启用的内置工具名列表 */
   @Column({ name: 'enabled_tools', type: 'json', nullable: true })

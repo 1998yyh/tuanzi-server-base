@@ -17,6 +17,8 @@ import { AgentConfig, ProviderType } from './entities/agent-config.entity';
 import { MessageRole } from './entities/message.entity';
 import { ToolRegistryService } from './tools/tool-registry.service';
 import { McpServersService } from '../mcp-servers/mcp-servers.service';
+import { SkillToolFactory } from '../skills/skill-tool.factory';
+import { Skill } from '../skills/skill.entity';
 import { TypeORMCheckpointer } from './checkpointers/typeorm.checkpointer';
 import { AGENT_ENCRYPTION_KEY } from './utils/encryption-key.provider';
 import { decrypt } from './utils/crypto.util';
@@ -78,6 +80,7 @@ export class AgentExecutorService {
     @Inject(AGENT_ENCRYPTION_KEY)
     private readonly encryptionKey: string,
     private readonly mcpServersService: McpServersService,
+    private readonly skillToolFactory: SkillToolFactory,
   ) {}
 
   /**
@@ -180,7 +183,9 @@ export class AgentExecutorService {
       return this.run(agentConfig, options.threadId, userMessage);
     }
 
-    const tools = options.overrideTools ?? (await this.getAllTools(agentConfig));
+    const tools =
+      options.overrideTools ??
+      (await this.getAllTools(agentConfig, options.isSkillExecution ?? false));
     const graph = this.buildGraph(
       { ...agentConfig, systemPrompt: options.overrideSystemPrompt ?? agentConfig.systemPrompt },
       tools,
@@ -209,10 +214,38 @@ export class AgentExecutorService {
     });
   }
 
-  /** 汇总内置工具 + 全局 MCP Server 工具（从 mcp_servers 表加载并解密后建连） */
-  private async getAllTools(config: AgentConfig): Promise<StructuredToolInterface[]> {
+  /**
+   * 汇总三层工具：内置工具 + MCP 工具 + Skill 工具。
+   * isSkillExecution=true 时为 Skill 子 Agent 执行，跳过 Skill 注入（防递归）。
+   */
+  private async getAllTools(
+    config: AgentConfig,
+    isSkillExecution = false,
+  ): Promise<StructuredToolInterface[]> {
     const mcpServers = await this.mcpServersService.findByAgentConfig(config.id);
-    return this.toolRegistry.getToolsForAgent(config, mcpServers);
+    const tools = await this.toolRegistry.getToolsForAgent(config, mcpServers);
+    if (isSkillExecution) {
+      return tools;
+    }
+    const skillTools = await this.skillToolFactory.createToolsForAgent(config, {
+      runBatch: (userMessage, options) => this.runBatch(config, userMessage, options),
+      buildSubTools: (skill) => this.buildSkillSubTools(config, skill),
+    });
+    return [...tools, ...skillTools];
+  }
+
+  /** Skill 子 Agent 的工具集：Skill.enabledTools（内置）+ Skill.mcpServers（MCP，过滤停用并解密） */
+  private async buildSkillSubTools(
+    config: AgentConfig,
+    skill: Skill,
+  ): Promise<StructuredToolInterface[]> {
+    const mcpRuntime = (skill.mcpServers ?? [])
+      .filter((s) => s.isActive)
+      .map((s) => this.mcpServersService.toRuntimeConfig(s));
+    return this.toolRegistry.getToolsForAgent(
+      { ...config, enabledTools: skill.enabledTools ?? [] },
+      mcpRuntime,
+    );
   }
 
   private buildGraph(
