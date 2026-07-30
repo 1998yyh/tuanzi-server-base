@@ -10,7 +10,8 @@ export interface NewMessageData {
   totalTokens?: number | null;
 }
 
-/** SSE 事件：type 为事件名，data 为 JSON 负载 */
+/** SSE 事件：type 为事件名，data 为 JSON 负载。
+ *  error 事件的 data 形状为 { code, message }（见 utils/stream-error.ts）。 */
 export interface SseEvent {
   type: 'message_start' | 'text_delta' | 'tool_use' | 'tool_result' | 'message_end' | 'error';
   data: Record<string, unknown>;

@@ -22,6 +22,7 @@ import { ConversationsService } from './conversations.service';
 import { CreateConversationDto } from './dto/create-conversation.dto';
 import { QueryConversationsDto } from './dto/query-conversations.dto';
 import { SendMessageDto } from './dto/send-message.dto';
+import { classifyStreamError } from './utils/stream-error';
 
 @ApiTags('Agent 会话')
 @ApiBearerAuth()
@@ -94,11 +95,11 @@ export class ConversationsController {
           res.write(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
         }
       } catch (e) {
-        // 流式执行中的任意异常：发送 error 事件后关闭流
+        // 流式执行中的任意异常：响应头已 flush、状态码无法再改，只能以 SSE error 事件透出。
+        // 完整原文进服务端日志；前端只拿到分类 code + 固定中文文案（不外泄上游细节）。
         this.logger.error(`会话 ${id} 流式执行异常: ${(e as Error).message}`, (e as Error).stack);
-        res.write(
-          `event: error\ndata: ${JSON.stringify({ message: 'Agent 执行异常，请稍后重试' })}\n\n`,
-        );
+        const { code, message } = classifyStreamError(e);
+        res.write(`event: error\ndata: ${JSON.stringify({ code, message })}\n\n`);
       }
       res.end();
       return;
