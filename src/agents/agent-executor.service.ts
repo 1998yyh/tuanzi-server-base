@@ -342,20 +342,15 @@ export class AgentExecutorService {
           apiKey,
           model: config.model,
           maxTokens: config.maxTokens,
+          // 传了 baseUrl 就覆盖 SDK 默认地址（中转网关/私有部署场景）
+          ...(config.baseUrl ? { anthropicApiUrl: config.baseUrl } : {}),
         });
       case ProviderType.OPENAI:
         return new ChatOpenAI({
           apiKey,
           model: config.model,
           maxTokens: config.maxTokens,
-        });
-      case ProviderType.DEEPSEEK:
-        // DeepSeek 官方 API 兼容 OpenAI 协议，复用 ChatOpenAI 换 baseURL 即可
-        return new ChatOpenAI({
-          apiKey,
-          model: config.model,
-          maxTokens: config.maxTokens,
-          configuration: { baseURL: 'https://api.deepseek.com' },
+          ...(config.baseUrl ? { configuration: { baseURL: config.baseUrl } } : {}),
         });
       default:
         throw new BadRequestException(`暂不支持的 provider: ${config.provider}`);

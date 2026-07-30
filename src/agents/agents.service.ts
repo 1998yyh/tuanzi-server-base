@@ -140,6 +140,7 @@ export class AgentsService {
       provider: agent.provider,
       model: agent.model,
       apiKeyMasked: maskApiKey(plaintext),
+      baseUrl: agent.baseUrl ?? null,
       systemPrompt: agent.systemPrompt,
       maxTokens: agent.maxTokens,
       maxIterations: agent.maxIterations,

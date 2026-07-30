@@ -24,6 +24,13 @@ export class AgentResponseDto {
   @ApiProperty({ example: '****3xYz', description: '脱敏后的 API Key（仅后 4 位）' })
   apiKeyMasked: string;
 
+  @ApiProperty({
+    example: 'https://gateway.example.com/v1',
+    description: '自定义 API 请求地址，为空走 SDK 默认地址',
+    nullable: true,
+  })
+  baseUrl: string | null;
+
   @ApiProperty({ example: '你是一个专业客服...', description: '系统提示词', nullable: true })
   systemPrompt: string | null;
 

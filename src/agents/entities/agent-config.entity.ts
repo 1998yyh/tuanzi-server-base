@@ -15,11 +15,14 @@ import { McpServer } from '../../mcp-servers/mcp-server.entity';
 import { Skill } from '../../skills/skill.entity';
 import { Conversation } from './conversation.entity';
 
-/** LLM 供应商：扩展时在此添加，AgentExecutorService.createModelFromConfig 的 switch 分支同步更新 */
+/**
+ * LLM API 协议类型：决定用哪个 ChatModel 类（anthropic 原生协议 / openai 兼容协议）。
+ * 扩展时在此添加，AgentExecutorService.createModelFromConfig 的 switch 分支同步更新。
+ * 兼容 OpenAI 协议的服务（DeepSeek、one-api 等中转网关）一律用 openai + baseUrl 表达。
+ */
 export enum ProviderType {
   ANTHROPIC = 'anthropic',
   OPENAI = 'openai',
-  DEEPSEEK = 'deepseek',
 }
 
 /** @deprecated 旧 JSON 内联配置，已迁移到 mcp_servers 表；仅 legacyMcpServers 字段使用 */
@@ -59,6 +62,10 @@ export class AgentConfig {
   /** AES-256-GCM 加密存储，绝不明文落库、绝不出现在 API 响应 */
   @Column({ name: 'api_key_encrypted', type: 'text' })
   apiKeyEncrypted: string;
+
+  /** 自定义 API 请求地址（中转网关/私有部署用），为空走 SDK 默认地址 */
+  @Column({ name: 'base_url', type: 'varchar', length: 500, nullable: true })
+  baseUrl: string | null;
 
   @Column({ name: 'system_prompt', type: 'text', nullable: true })
   systemPrompt: string | null;

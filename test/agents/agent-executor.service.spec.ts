@@ -374,14 +374,18 @@ describe('AgentExecutorService', () => {
       });
     });
 
-    it('deepseek provider 应该创建 ChatOpenAI 并指向 DeepSeek baseURL', async () => {
+    it('openai provider 配置 baseUrl 时应该覆盖默认请求地址', async () => {
       const { ChatOpenAI } = jest.requireMock('@langchain/openai') as {
         ChatOpenAI: jest.Mock;
       };
       mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
 
       await service.run(
-        buildAgent({ provider: ProviderType.DEEPSEEK, model: 'deepseek-v4-flash' }),
+        buildAgent({
+          provider: ProviderType.OPENAI,
+          model: 'deepseek-v4-flash',
+          baseUrl: 'https://api.deepseek.com',
+        }),
         'conv-1',
         '你好',
       );
@@ -391,6 +395,22 @@ describe('AgentExecutorService', () => {
         model: 'deepseek-v4-flash',
         maxTokens: 4096,
         configuration: { baseURL: 'https://api.deepseek.com' },
+      });
+    });
+
+    it('anthropic provider 配置 baseUrl 时应该传 anthropicApiUrl', async () => {
+      const { ChatAnthropic } = jest.requireMock('@langchain/anthropic') as {
+        ChatAnthropic: jest.Mock;
+      };
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(buildAgent({ baseUrl: 'https://gateway.example.com' }), 'conv-1', '你好');
+
+      expect(ChatAnthropic).toHaveBeenCalledWith({
+        apiKey: API_KEY,
+        model: 'claude-opus-4-8',
+        maxTokens: 4096,
+        anthropicApiUrl: 'https://gateway.example.com',
       });
     });
   });

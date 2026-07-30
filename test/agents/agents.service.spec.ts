@@ -38,6 +38,7 @@ describe('AgentsService', () => {
     provider: ProviderType.ANTHROPIC,
     model: 'claude-opus-4-8',
     apiKeyEncrypted: encrypt(API_KEY, TEST_KEY),
+    baseUrl: null,
     systemPrompt: '你是客服',
     maxTokens: 4096,
     maxIterations: 10,

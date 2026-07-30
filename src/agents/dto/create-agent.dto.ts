@@ -6,6 +6,7 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  IsUrl,
   Length,
   Max,
   Min,
@@ -44,6 +45,16 @@ export class CreateAgentDto {
   @IsString()
   @IsNotEmpty()
   apiKey: string;
+
+  @ApiProperty({
+    required: false,
+    example: 'https://gateway.example.com/v1',
+    description: '自定义 API 请求地址（中转网关/私有部署用），不传走 SDK 默认地址',
+  })
+  // require_tld: false 放行 localhost / 内网 IP 这类无顶级域的地址
+  @IsUrl({ require_tld: false, protocols: ['http', 'https'] })
+  @IsOptional()
+  baseUrl?: string | null;
 
   @ApiProperty({ required: false, example: '你是一个专业客服...', description: '系统提示词' })
   @IsString()
