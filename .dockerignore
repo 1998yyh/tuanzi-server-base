@@ -1,0 +1,16 @@
+node_modules
+dist
+test
+coverage
+docs
+.git
+.github
+.claude
+*.md
+.env
+.env.local
+.env.production
+docker-compose.yml
+docker-compose.prod.yml
+Dockerfile
+uploads

@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: tuanzi-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_DATABASE}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-p${DB_ROOT_PASSWORD}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - tuanzi-net
+
+  app:
+    build: .
+    container_name: tuanzi-app
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      # 连 compose 内部网络的服务名，别写 localhost
+      DB_HOST: mysql
+    ports:
+      # 只绑回环地址，对外走 Nginx 反代，别直接裸奔
+      - '127.0.0.1:3000:3000'
+    volumes:
+      # 封面图等上传文件持久化，容器重建不丢
+      - ./uploads:/app/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - tuanzi-net
+
+volumes:
+  mysql_data:
+
+networks:
+  tuanzi-net:
+    driver: bridge
