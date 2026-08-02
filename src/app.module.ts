@@ -7,6 +7,7 @@ import { DailyReportsModule } from './daily-reports/daily-reports.module';
 import { AgentsModule } from './agents/agents.module';
 import { McpServersModule } from './mcp-servers/mcp-servers.module';
 import { SkillsModule } from './skills/skills.module';
+import { StockSignalsModule } from './stock-signals/stock-signals.module';
 
 @Module({
   imports: [
@@ -39,6 +40,7 @@ import { SkillsModule } from './skills/skills.module';
     AgentsModule,
     McpServersModule,
     SkillsModule,
+    StockSignalsModule,
   ],
 })
 export class AppModule {}
