@@ -1,6 +1,6 @@
 import { Injectable, ConflictException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { QueryFailedError, Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { User } from './users.entity';
 
@@ -38,7 +38,19 @@ export class UsersService {
       password: hashedPassword,
     });
 
-    return this.usersRepository.save(user);
+    try {
+      return await this.usersRepository.save(user);
+    } catch (error) {
+      // 兜底并发竞态：两个请求同时通过上方查重后，唯一索引会拦下后到的插入，
+      // 将 MySQL 的 ER_DUP_ENTRY 转为业务冲突，避免泄漏 500
+      if (
+        error instanceof QueryFailedError &&
+        (error.driverError as { code?: string })?.code === 'ER_DUP_ENTRY'
+      ) {
+        throw new ConflictException('邮箱或用户名已被注册');
+      }
+      throw error;
+    }
   }
 
   async findByEmail(email: string): Promise<User | null> {
