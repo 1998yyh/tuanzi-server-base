@@ -269,12 +269,17 @@ export class AgentExecutorService {
       throw new BadRequestException(`模型 ${config.model} 不支持工具调用，请关闭工具配置`);
     }
     const modelWithTools = tools.length ? model.bindTools!(tools) : model;
-    const systemMessage = config.systemPrompt ? new SystemMessage(config.systemPrompt) : null;
+    // 系统级时间戳元数据（Kimi 风格）：graph 每次调用都重建，时间戳随每轮用户消息刷新；
+    // 与用户 systemPrompt 拼接后前插到模型输入，不写入 checkpoint
+    const timeMeta = `timestamp="${this.formatTimestamp()}"`;
+    const systemMessage = new SystemMessage(
+      config.systemPrompt ? `${config.systemPrompt}\n\n${timeMeta}` : timeMeta,
+    );
 
     const graph = new StateGraph(AgentStateAnnotation)
       .addNode(AGENT_NODE, async (state: AgentState) => {
-        // systemPrompt 只在调用时前插，不写入图状态（避免 checkpoint 里重复存）
-        const input = systemMessage ? [systemMessage, ...state.messages] : state.messages;
+        // systemMessage 只在调用时前插，不写入图状态（避免 checkpoint 里重复存）
+        const input = [systemMessage, ...state.messages];
         const response = await modelWithTools.invoke(input);
         return { messages: [response], iterations: state.iterations + 1 };
       })
@@ -331,6 +336,24 @@ export class AgentExecutorService {
         );
       }),
     ]).finally(() => clearTimeout(timer));
+  }
+
+  /**
+   * 当前时间（北京时间），格式 `2026-08-02 20:00:00 +08:00`。
+   * sv-SE locale 输出即 ISO 风格的 YYYY-MM-DD HH:mm:ss。
+   */
+  private formatTimestamp(): string {
+    const datetime = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(new Date());
+    return `${datetime} +08:00`;
   }
 
   /** 按 Agent 配置创建 ChatModel；解密结果只活在函数栈帧 */

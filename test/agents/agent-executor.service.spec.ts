@@ -237,7 +237,7 @@ describe('AgentExecutorService', () => {
       ]);
     });
 
-    it('systemPrompt 应该作为 SystemMessage 前插到模型输入', async () => {
+    it('systemPrompt 应该拼接时间戳元数据后作为 SystemMessage 前插到模型输入', async () => {
       mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
 
       await service.run(buildAgent({ systemPrompt: '你是专业客服' }), 'conv-1', '你好');
@@ -247,7 +247,24 @@ describe('AgentExecutorService', () => {
         content: unknown;
       }[];
       expect(inputMessages[0]._getType()).toBe('system');
-      expect(inputMessages[0].content).toBe('你是专业客服');
+      expect(inputMessages[0].content).toMatch(
+        /^你是专业客服\n\ntimestamp="\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \+08:00"$/,
+      );
+    });
+
+    it('未配置 systemPrompt 时也应该注入时间戳元数据', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(buildAgent(), 'conv-1', '现在几点');
+
+      const inputMessages = mockInvoke.mock.calls[0][0] as {
+        _getType(): string;
+        content: unknown;
+      }[];
+      expect(inputMessages[0]._getType()).toBe('system');
+      expect(inputMessages[0].content).toMatch(
+        /^timestamp="\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \+08:00"$/,
+      );
     });
 
     it('应该从 McpServersService 加载 MCP 工具并传给 ToolRegistry', async () => {
@@ -341,7 +358,8 @@ describe('AgentExecutorService', () => {
         content: unknown;
       }[];
       expect(inputMessages[0]._getType()).toBe('system');
-      expect(inputMessages[0].content).toBe('Skill 的执行指令');
+      expect(inputMessages[0].content).toContain('Skill 的执行指令');
+      expect(inputMessages[0].content).not.toContain('原始提示词');
     });
 
     it('overrideTools 时不应该再加载 Agent 工具', async () => {
