@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { McpServerConfig, ProviderType } from '../entities/agent-config.entity';
+import { ProviderType } from '../entities/agent-config.entity';
 
 /**
  * Agent 配置响应形状：API Key 只返回脱敏后 4 位，密文绝不出现在响应中。
@@ -24,6 +24,13 @@ export class AgentResponseDto {
   @ApiProperty({ example: '****3xYz', description: '脱敏后的 API Key（仅后 4 位）' })
   apiKeyMasked: string;
 
+  @ApiProperty({
+    example: 'https://gateway.example.com/v1',
+    description: '自定义 API 请求地址，为空走 SDK 默认地址',
+    nullable: true,
+  })
+  baseUrl: string | null;
+
   @ApiProperty({ example: '你是一个专业客服...', description: '系统提示词', nullable: true })
   systemPrompt: string | null;
 
@@ -35,9 +42,6 @@ export class AgentResponseDto {
 
   @ApiProperty({ type: [String], example: ['web_search'], description: '启用的内置工具名列表' })
   enabledTools: string[];
-
-  @ApiProperty({ description: '挂载的 MCP Server 列表' })
-  mcpServers: McpServerConfig[];
 
   @ApiProperty({ example: true, description: '是否启用（软删除后为 false）' })
   isActive: boolean;

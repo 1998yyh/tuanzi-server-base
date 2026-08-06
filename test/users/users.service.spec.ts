@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { QueryFailedError, Repository } from 'typeorm';
 import { ConflictException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { UsersService } from 'src/users/users.service';
@@ -89,6 +89,41 @@ describe('UsersService', () => {
         '用户名已被使用',
       );
       expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('并发竞态撞上唯一索引（ER_DUP_ENTRY）时应转为 ConflictException', async () => {
+      repository.findOne.mockResolvedValue(null);
+      (bcrypt.hash as jest.Mock).mockResolvedValue('hashedPassword');
+      repository.create.mockReturnValue(mockUser);
+      repository.save.mockRejectedValue(
+        Object.assign(new QueryFailedError('INSERT', [], new Error('Duplicate entry')), {
+          driverError: { code: 'ER_DUP_ENTRY' },
+        }),
+      );
+
+      await expect(service.create('race@test.com', 'raceuser', 'password123')).rejects.toThrow(
+        ConflictException,
+      );
+      await expect(service.create('race@test.com', 'raceuser', 'password123')).rejects.toThrow(
+        '邮箱或用户名已被注册',
+      );
+    });
+
+    it('唯一索引以外的数据库错误应原样抛出', async () => {
+      repository.findOne.mockResolvedValue(null);
+      (bcrypt.hash as jest.Mock).mockResolvedValue('hashedPassword');
+      repository.create.mockReturnValue(mockUser);
+      const dbError = Object.assign(
+        new QueryFailedError('INSERT', [], new Error('Connection lost')),
+        {
+          driverError: { code: 'PROTOCOL_CONNECTION_LOST' },
+        },
+      );
+      repository.save.mockRejectedValue(dbError);
+
+      await expect(service.create('a@test.com', 'auser', 'password123')).rejects.toThrow(
+        'Connection lost',
+      );
     });
   });
 

@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
 import { Annotation, END, START, StateGraph, messagesStateReducer } from '@langchain/langgraph';
 import {
   AIMessage,
@@ -16,6 +16,9 @@ import { ChatOpenAI } from '@langchain/openai';
 import { AgentConfig, ProviderType } from './entities/agent-config.entity';
 import { MessageRole } from './entities/message.entity';
 import { ToolRegistryService } from './tools/tool-registry.service';
+import { McpServersService } from '../mcp-servers/mcp-servers.service';
+import { SkillToolFactory } from '../skills/skill-tool.factory';
+import { Skill } from '../skills/skill.entity';
 import { TypeORMCheckpointer } from './checkpointers/typeorm.checkpointer';
 import { AGENT_ENCRYPTION_KEY } from './utils/encryption-key.provider';
 import { decrypt } from './utils/crypto.util';
@@ -45,6 +48,18 @@ type AgentState = typeof AgentStateAnnotation.State;
 const AGENT_NODE = 'agent_node';
 const TOOLS_NODE = 'tools_node';
 
+/** runBatch 批量执行选项 */
+export interface BatchRunOptions {
+  /** 提供则走 checkpointer 持久化（thread_id = 该值）；缺省为一次性无历史执行 */
+  threadId?: string;
+  /** Skill 子 Agent 的执行指令（替代 agentConfig.systemPrompt） */
+  overrideSystemPrompt?: string | null;
+  /** Skill 子 Agent 的工具集（替代正常工具加载） */
+  overrideTools?: StructuredToolInterface[];
+  /** 防递归：为 true 时不注入 Skill 工具（Task 4 生效） */
+  isSkillExecution?: boolean;
+}
+
 /**
  * Agent 执行核心：LangGraph 状态图（ReAct loop）构建与执行。
  *
@@ -59,11 +74,15 @@ const TOOLS_NODE = 'tools_node';
  */
 @Injectable()
 export class AgentExecutorService {
+  private readonly logger = new Logger(AgentExecutorService.name);
+
   constructor(
     private readonly toolRegistry: ToolRegistryService,
     private readonly checkpointer: TypeORMCheckpointer,
     @Inject(AGENT_ENCRYPTION_KEY)
     private readonly encryptionKey: string,
+    private readonly mcpServersService: McpServersService,
+    private readonly skillToolFactory: SkillToolFactory,
   ) {}
 
   /**
@@ -74,7 +93,7 @@ export class AgentExecutorService {
     conversationId: string,
     userMessage: string,
   ): Promise<NewMessageData[]> {
-    const tools = await this.toolRegistry.getToolsForAgent(agentConfig);
+    const tools = await this.getAllTools(agentConfig);
     const graph = this.buildGraph(agentConfig, tools);
     const config = { configurable: { thread_id: conversationId } };
 
@@ -114,7 +133,7 @@ export class AgentExecutorService {
     conversationId: string,
     userMessage: string,
   ): AsyncGenerator<SseEvent> {
-    const tools = await this.toolRegistry.getToolsForAgent(agentConfig);
+    const tools = await this.getAllTools(agentConfig);
     const graph = this.buildGraph(agentConfig, tools);
 
     const stream = graph.streamEvents(
@@ -146,18 +165,121 @@ export class AgentExecutorService {
     }
   }
 
-  private buildGraph(config: AgentConfig, tools: StructuredToolInterface[]) {
+  /**
+   * 批量执行：不走 SSE，await 完整结果后返回本轮新增消息。
+   *
+   * 两种形态：
+   * - 带 threadId 且无覆盖项：等价 run（走 checkpoint，第三期定时任务用）
+   * - 其余：一次性无历史执行（Skill 子 Agent 用），不产生 checkpoint 数据
+   */
+  async runBatch(
+    agentConfig: AgentConfig,
+    userMessage: string,
+    options: BatchRunOptions = {},
+  ): Promise<NewMessageData[]> {
+    const hasOverrides =
+      options.overrideTools !== undefined ||
+      options.overrideSystemPrompt !== undefined ||
+      options.isSkillExecution === true;
+    if (options.threadId && !hasOverrides) {
+      return this.run(agentConfig, options.threadId, userMessage);
+    }
+
+    const tools =
+      options.overrideTools ??
+      (await this.getAllTools(agentConfig, options.isSkillExecution ?? false));
+    const graph = this.buildGraph(
+      { ...agentConfig, systemPrompt: options.overrideSystemPrompt ?? agentConfig.systemPrompt },
+      tools,
+      false,
+    );
+    const invokeConfig = options.threadId ? { configurable: { thread_id: options.threadId } } : {};
+
+    const result = await graph.invoke(
+      {
+        messages: [new HumanMessage(userMessage)],
+        maxIterations: agentConfig.maxIterations,
+      },
+      invokeConfig,
+    );
+
+    // 一次性执行无历史：跳过 userMessage 本身即全部新增消息
+    const newMessages = (result.messages as BaseMessage[]).slice(1);
+    let runningTotal = 0;
+    return newMessages.map((m) => {
+      const data = this.toMessageData(m);
+      if (data.totalTokens != null) {
+        runningTotal += data.totalTokens;
+        data.totalTokens = runningTotal;
+      }
+      return data;
+    });
+  }
+
+  /**
+   * 汇总三层工具：内置工具 + MCP 工具 + Skill 工具。
+   * isSkillExecution=true 时为 Skill 子 Agent 执行，跳过 Skill 注入（防递归）。
+   */
+  private async getAllTools(
+    config: AgentConfig,
+    isSkillExecution = false,
+  ): Promise<StructuredToolInterface[]> {
+    const mcpServers = await this.mcpServersService.findByAgentConfig(config.id);
+    const tools = await this.toolRegistry.getToolsForAgent(config, mcpServers);
+    if (isSkillExecution) {
+      return tools;
+    }
+    const skillTools = await this.skillToolFactory.createToolsForAgent(config, {
+      runBatch: (userMessage, options) => this.runBatch(config, userMessage, options),
+      buildSubTools: (skill) => this.buildSkillSubTools(config, skill),
+    });
+    // Skill 名与内置/MCP 工具同名时跳过：bindTools 收到重名工具会让模型 API 直接报错
+    const existingNames = new Set(tools.map((t) => t.name));
+    const dedupedSkillTools = skillTools.filter((t) => {
+      if (existingNames.has(t.name)) {
+        this.logger.warn(`Skill 工具 "${t.name}" 与内置/MCP 工具同名，已跳过`);
+        return false;
+      }
+      return true;
+    });
+    return [...tools, ...dedupedSkillTools];
+  }
+
+  /** Skill 子 Agent 的工具集：Skill.enabledTools（内置）+ Skill.mcpServers（MCP，过滤停用并解密） */
+  private async buildSkillSubTools(
+    config: AgentConfig,
+    skill: Skill,
+  ): Promise<StructuredToolInterface[]> {
+    const mcpRuntime = (skill.mcpServers ?? [])
+      .filter((s) => s.isActive)
+      .map((s) => this.mcpServersService.toRuntimeConfig(s));
+    return this.toolRegistry.getToolsForAgent(
+      { ...config, enabledTools: skill.enabledTools ?? [] },
+      mcpRuntime,
+    );
+  }
+
+  private buildGraph(
+    config: AgentConfig,
+    tools: StructuredToolInterface[],
+    useCheckpointer = true,
+  ) {
     const model = this.createModelFromConfig(config);
     if (tools.length && !model.bindTools) {
       throw new BadRequestException(`模型 ${config.model} 不支持工具调用，请关闭工具配置`);
     }
     const modelWithTools = tools.length ? model.bindTools!(tools) : model;
-    const systemMessage = config.systemPrompt ? new SystemMessage(config.systemPrompt) : null;
+    // 系统级时间戳元数据（Kimi 风格）：graph 每次调用都重建，时间戳随每轮用户消息刷新；
+    // 与用户 systemPrompt 拼接后前插到模型输入，不写入 checkpoint
+    const timeMeta = `timestamp="${this.formatTimestamp()}"`;
+    const systemMessage = new SystemMessage(
+      config.systemPrompt ? `${config.systemPrompt}\n\n${timeMeta}` : timeMeta,
+    );
 
     const graph = new StateGraph(AgentStateAnnotation)
       .addNode(AGENT_NODE, async (state: AgentState) => {
-        // systemPrompt 只在调用时前插，不写入图状态（避免 checkpoint 里重复存）
-        const input = systemMessage ? [systemMessage, ...state.messages] : state.messages;
+        // systemMessage 只在调用时前插，不写入图状态（避免 checkpoint 里重复存）
+        const input = [systemMessage, ...state.messages];
         const response = await modelWithTools.invoke(input);
         return { messages: [response], iterations: state.iterations + 1 };
       })
@@ -190,7 +312,7 @@ export class AgentExecutorService {
       })
       .addEdge(TOOLS_NODE, AGENT_NODE);
 
-    return graph.compile({ checkpointer: this.checkpointer });
+    return graph.compile(useCheckpointer ? { checkpointer: this.checkpointer } : {});
   }
 
   /**
@@ -216,6 +338,24 @@ export class AgentExecutorService {
     ]).finally(() => clearTimeout(timer));
   }
 
+  /**
+   * 当前时间（北京时间），格式 `2026-08-02 20:00:00 +08:00`。
+   * sv-SE locale 输出即 ISO 风格的 YYYY-MM-DD HH:mm:ss。
+   */
+  private formatTimestamp(): string {
+    const datetime = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(new Date());
+    return `${datetime} +08:00`;
+  }
+
   /** 按 Agent 配置创建 ChatModel；解密结果只活在函数栈帧 */
   private createModelFromConfig(config: AgentConfig): BaseChatModel {
     const apiKey = decrypt(config.apiKeyEncrypted, this.encryptionKey);
@@ -225,20 +365,15 @@ export class AgentExecutorService {
           apiKey,
           model: config.model,
           maxTokens: config.maxTokens,
+          // 传了 baseUrl 就覆盖 SDK 默认地址（中转网关/私有部署场景）
+          ...(config.baseUrl ? { anthropicApiUrl: config.baseUrl } : {}),
         });
       case ProviderType.OPENAI:
         return new ChatOpenAI({
           apiKey,
           model: config.model,
           maxTokens: config.maxTokens,
-        });
-      case ProviderType.DEEPSEEK:
-        // DeepSeek 官方 API 兼容 OpenAI 协议，复用 ChatOpenAI 换 baseURL 即可
-        return new ChatOpenAI({
-          apiKey,
-          model: config.model,
-          maxTokens: config.maxTokens,
-          configuration: { baseURL: 'https://api.deepseek.com' },
+          ...(config.baseUrl ? { configuration: { baseURL: config.baseUrl } } : {}),
         });
       default:
         throw new BadRequestException(`暂不支持的 provider: ${config.provider}`);

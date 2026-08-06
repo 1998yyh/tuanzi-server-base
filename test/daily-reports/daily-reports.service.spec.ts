@@ -236,4 +236,37 @@ describe('DailyReportsService', () => {
       await expect(service.remove('nonexistent')).rejects.toThrow(NotFoundException);
     });
   });
+
+  describe('upsert', () => {
+    const upsertDto = {
+      type: DailyReportType.AI,
+      title: 'AI情报早报 | 2026-03-16',
+      date: '2026-03-16',
+      content: '# 新内容',
+    };
+
+    it('同类型同日期已存在时应该覆盖 title/content', async () => {
+      repository.findOne.mockResolvedValue({ ...mockReport });
+      repository.save.mockImplementation(async (v) => v as DailyReport);
+
+      const result = await service.upsert(upsertDto);
+
+      expect(repository.create).not.toHaveBeenCalled();
+      const saved = repository.save.mock.calls[0][0] as DailyReport;
+      expect(saved.id).toBe('test-uuid');
+      expect(saved.content).toBe('# 新内容');
+      expect(result.id).toBe('test-uuid');
+    });
+
+    it('不存在时应该新建', async () => {
+      repository.findOne.mockResolvedValue(null);
+      repository.create.mockReturnValue(mockReport);
+      repository.save.mockResolvedValue(mockReport);
+
+      const result = await service.upsert(upsertDto);
+
+      expect(repository.create).toHaveBeenCalledWith(upsertDto);
+      expect(result).toEqual(mockReport);
+    });
+  });
 });

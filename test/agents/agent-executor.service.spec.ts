@@ -4,6 +4,8 @@ import { AIMessage } from '@langchain/core/messages';
 import { StructuredToolInterface } from '@langchain/core/tools';
 import { AgentExecutorService } from 'src/agents/agent-executor.service';
 import { ToolRegistryService } from 'src/agents/tools/tool-registry.service';
+import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
+import { SkillToolFactory } from 'src/skills/skill-tool.factory';
 import { TypeORMCheckpointer } from 'src/agents/checkpointers/typeorm.checkpointer';
 import { AGENT_ENCRYPTION_KEY } from 'src/agents/utils/encryption-key.provider';
 import { encrypt } from 'src/agents/utils/crypto.util';
@@ -34,6 +36,8 @@ const API_KEY = 'sk-test-key-123456';
 describe('AgentExecutorService', () => {
   let service: AgentExecutorService;
   let toolRegistry: { getToolsForAgent: jest.Mock };
+  let mcpServersService: { findByAgentConfig: jest.Mock };
+  let skillToolFactory: { createToolsForAgent: jest.Mock };
 
   const buildAgent = (override: Partial<AgentConfig> = {}): AgentConfig =>
     ({
@@ -47,7 +51,6 @@ describe('AgentExecutorService', () => {
       maxTokens: 4096,
       maxIterations: 10,
       enabledTools: [],
-      mcpServers: [],
       isActive: true,
       ...override,
     }) as AgentConfig;
@@ -60,12 +63,16 @@ describe('AgentExecutorService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     toolRegistry = { getToolsForAgent: jest.fn().mockResolvedValue([]) };
+    mcpServersService = { findByAgentConfig: jest.fn().mockResolvedValue([]) };
+    skillToolFactory = { createToolsForAgent: jest.fn().mockResolvedValue([]) };
     mockBindTools.mockImplementation(() => ({ invoke: mockInvoke }));
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AgentExecutorService,
         { provide: ToolRegistryService, useValue: toolRegistry },
+        { provide: McpServersService, useValue: mcpServersService },
+        { provide: SkillToolFactory, useValue: skillToolFactory },
         // 用真实 MemorySaver 替代 TypeORMCheckpointer，让图状态流转真实发生
         {
           provide: TypeORMCheckpointer,
@@ -230,7 +237,7 @@ describe('AgentExecutorService', () => {
       ]);
     });
 
-    it('systemPrompt 应该作为 SystemMessage 前插到模型输入', async () => {
+    it('systemPrompt 应该拼接时间戳元数据后作为 SystemMessage 前插到模型输入', async () => {
       mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
 
       await service.run(buildAgent({ systemPrompt: '你是专业客服' }), 'conv-1', '你好');
@@ -240,7 +247,128 @@ describe('AgentExecutorService', () => {
         content: unknown;
       }[];
       expect(inputMessages[0]._getType()).toBe('system');
-      expect(inputMessages[0].content).toBe('你是专业客服');
+      expect(inputMessages[0].content).toMatch(
+        /^你是专业客服\n\ntimestamp="\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \+08:00"$/,
+      );
+    });
+
+    it('未配置 systemPrompt 时也应该注入时间戳元数据', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(buildAgent(), 'conv-1', '现在几点');
+
+      const inputMessages = mockInvoke.mock.calls[0][0] as {
+        _getType(): string;
+        content: unknown;
+      }[];
+      expect(inputMessages[0]._getType()).toBe('system');
+      expect(inputMessages[0].content).toMatch(
+        /^timestamp="\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \+08:00"$/,
+      );
+    });
+
+    it('应该从 McpServersService 加载 MCP 工具并传给 ToolRegistry', async () => {
+      const runtimeServer = { name: '远程工具', type: 'sse', url: 'https://mcp.example.com/sse' };
+      mcpServersService.findByAgentConfig.mockResolvedValue([runtimeServer]);
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(buildAgent(), 'conv-1', '你好');
+
+      expect(mcpServersService.findByAgentConfig).toHaveBeenCalledWith('agent-1');
+      expect(toolRegistry.getToolsForAgent).toHaveBeenCalledWith(expect.anything(), [
+        runtimeServer,
+      ]);
+    });
+
+    it('正常执行应该把 Skill 工具追加进工具列表', async () => {
+      const skillTool = { name: 'generate_ai_report', invoke: jest.fn() };
+      skillToolFactory.createToolsForAgent.mockResolvedValue([skillTool]);
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(buildAgent(), 'conv-1', '你好');
+
+      expect(skillToolFactory.createToolsForAgent).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          runBatch: expect.any(Function),
+          buildSubTools: expect.any(Function),
+        }),
+      );
+      expect(mockBindTools).toHaveBeenCalledWith([skillTool]);
+    });
+
+    it('Skill 工具与内置/MCP 工具同名时应该跳过，避免 bindTools 重名报错', async () => {
+      const mcpTool = { name: 'generate_ai_report', invoke: jest.fn() };
+      const dupSkillTool = { name: 'generate_ai_report', invoke: jest.fn() };
+      const uniqueSkillTool = { name: 'generate_stock_report', invoke: jest.fn() };
+      toolRegistry.getToolsForAgent.mockResolvedValue([mcpTool]);
+      skillToolFactory.createToolsForAgent.mockResolvedValue([dupSkillTool, uniqueSkillTool]);
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(buildAgent(), 'conv-1', '你好');
+
+      expect(mockBindTools).toHaveBeenCalledWith([mcpTool, uniqueSkillTool]);
+    });
+
+    it('isSkillExecution=true 时不应该注入 Skill 工具（防递归）', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.runBatch(buildAgent(), '执行任务', { isSkillExecution: true });
+
+      expect(skillToolFactory.createToolsForAgent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('runBatch（批量执行）', () => {
+    it('带 threadId 且无覆盖项时应该走 checkpoint（等价 run）', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: '批量回答' }));
+
+      const result = await service.runBatch(buildAgent(), '生成日报', { threadId: 'conv-9' });
+
+      expect(toolRegistry.getToolsForAgent).toHaveBeenCalled();
+      expect(result).toEqual([
+        { role: MessageRole.ASSISTANT, content: '批量回答', toolCalls: null, totalTokens: null },
+      ]);
+    });
+
+    it('无 threadId 时应该一次性执行，不写 checkpoint 且只返回本轮消息', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: '子 Agent 输出' }));
+
+      const result = await service.runBatch(buildAgent(), '执行任务');
+
+      expect(result).toEqual([
+        {
+          role: MessageRole.ASSISTANT,
+          content: '子 Agent 输出',
+          toolCalls: null,
+          totalTokens: null,
+        },
+      ]);
+    });
+
+    it('overrideSystemPrompt 应该替代 Agent 自身的 systemPrompt', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.runBatch(buildAgent({ systemPrompt: '原始提示词' }), '执行任务', {
+        overrideSystemPrompt: 'Skill 的执行指令',
+      });
+
+      const inputMessages = mockInvoke.mock.calls[0][0] as {
+        _getType(): string;
+        content: unknown;
+      }[];
+      expect(inputMessages[0]._getType()).toBe('system');
+      expect(inputMessages[0].content).toContain('Skill 的执行指令');
+      expect(inputMessages[0].content).not.toContain('原始提示词');
+    });
+
+    it('overrideTools 时不应该再加载 Agent 工具', async () => {
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.runBatch(buildAgent(), '执行任务', { overrideTools: [calculatorTool] });
+
+      expect(toolRegistry.getToolsForAgent).not.toHaveBeenCalled();
+      expect(mockBindTools).toHaveBeenCalledWith([calculatorTool]);
     });
   });
 
@@ -264,14 +392,18 @@ describe('AgentExecutorService', () => {
       });
     });
 
-    it('deepseek provider 应该创建 ChatOpenAI 并指向 DeepSeek baseURL', async () => {
+    it('openai provider 配置 baseUrl 时应该覆盖默认请求地址', async () => {
       const { ChatOpenAI } = jest.requireMock('@langchain/openai') as {
         ChatOpenAI: jest.Mock;
       };
       mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
 
       await service.run(
-        buildAgent({ provider: ProviderType.DEEPSEEK, model: 'deepseek-v4-flash' }),
+        buildAgent({
+          provider: ProviderType.OPENAI,
+          model: 'deepseek-v4-flash',
+          baseUrl: 'https://api.deepseek.com',
+        }),
         'conv-1',
         '你好',
       );
@@ -281,6 +413,22 @@ describe('AgentExecutorService', () => {
         model: 'deepseek-v4-flash',
         maxTokens: 4096,
         configuration: { baseURL: 'https://api.deepseek.com' },
+      });
+    });
+
+    it('anthropic provider 配置 baseUrl 时应该传 anthropicApiUrl', async () => {
+      const { ChatAnthropic } = jest.requireMock('@langchain/anthropic') as {
+        ChatAnthropic: jest.Mock;
+      };
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(buildAgent({ baseUrl: 'https://gateway.example.com' }), 'conv-1', '你好');
+
+      expect(ChatAnthropic).toHaveBeenCalledWith({
+        apiKey: API_KEY,
+        model: 'claude-opus-4-8',
+        maxTokens: 4096,
+        anthropicApiUrl: 'https://gateway.example.com',
       });
     });
   });

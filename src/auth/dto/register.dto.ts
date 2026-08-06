@@ -13,8 +13,10 @@ export class RegisterDto {
   @Matches(/^[a-zA-Z0-9_]+$/, { message: '用户名只能包含字母、数字和下划线' })
   username: string;
 
-  @ApiProperty({ description: '密码', example: 'Password123!', minLength: 6 })
+  @ApiProperty({ description: '密码', example: 'Password123!', minLength: 6, maxLength: 72 })
   @IsString()
   @MinLength(6, { message: '密码至少6个字符' })
+  // bcrypt 只取密码前 72 字节参与哈希，超出部分被静默截断，必须限制上限
+  @MaxLength(72, { message: '密码最多72个字符' })
   password: string;
 }

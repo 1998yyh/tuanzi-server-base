@@ -75,6 +75,17 @@ export class DailyReportsService {
     return this.dailyReportRepository.save(report);
   }
 
+  /** 同 type+date 已存在则覆盖 title/content，否则新建（AI 自动生成日报场景） */
+  async upsert(dto: CreateDailyReportDto): Promise<DailyReport> {
+    const existing = await this.findByTypeAndDate(dto.type, dto.date);
+    if (existing) {
+      existing.title = dto.title;
+      existing.content = dto.content;
+      return this.dailyReportRepository.save(existing);
+    }
+    return this.dailyReportRepository.save(this.dailyReportRepository.create(dto));
+  }
+
   async remove(id: string): Promise<void> {
     const report = await this.findOne(id);
     await this.dailyReportRepository.remove(report);

@@ -6,19 +6,26 @@ import {
   UpdateDateColumn,
   ManyToOne,
   OneToMany,
+  ManyToMany,
   JoinColumn,
+  JoinTable,
 } from 'typeorm';
 import { User } from '../../users/users.entity';
+import { McpServer } from '../../mcp-servers/mcp-server.entity';
+import { Skill } from '../../skills/skill.entity';
 import { Conversation } from './conversation.entity';
 
-/** LLM 供应商：扩展时在此添加，AgentExecutorService.createModelFromConfig 的 switch 分支同步更新 */
+/**
+ * LLM API 协议类型：决定用哪个 ChatModel 类（anthropic 原生协议 / openai 兼容协议）。
+ * 扩展时在此添加，AgentExecutorService.createModelFromConfig 的 switch 分支同步更新。
+ * 兼容 OpenAI 协议的服务（DeepSeek、one-api 等中转网关）一律用 openai + baseUrl 表达。
+ */
 export enum ProviderType {
   ANTHROPIC = 'anthropic',
   OPENAI = 'openai',
-  DEEPSEEK = 'deepseek',
 }
 
-/** MCP Server 配置。stdio 模式会在服务端执行子进程，仅管理员可配置 */
+/** @deprecated 旧 JSON 内联配置，已迁移到 mcp_servers 表；仅 legacyMcpServers 字段使用 */
 export interface McpServerConfig {
   name: string;
   transport: 'stdio' | 'sse';
@@ -56,6 +63,10 @@ export class AgentConfig {
   @Column({ name: 'api_key_encrypted', type: 'text' })
   apiKeyEncrypted: string;
 
+  /** 自定义 API 请求地址（中转网关/私有部署用），为空走 SDK 默认地址 */
+  @Column({ name: 'base_url', type: 'varchar', length: 500, nullable: true })
+  baseUrl: string | null;
+
   @Column({ name: 'system_prompt', type: 'text', nullable: true })
   systemPrompt: string | null;
 
@@ -66,9 +77,30 @@ export class AgentConfig {
   @Column({ name: 'max_iterations', default: 10 })
   maxIterations: number;
 
-  /** MySQL JSON 列不支持字面默认值，用 nullable 代替，读取处 ?? [] */
+  /**
+   * @deprecated 旧 JSON 内联 MCP 配置，已迁移到 mcp_servers + agent_config_mcp_servers。
+   * 保留列待数据迁移完成后删除；代码不再读写。
+   */
   @Column({ name: 'mcp_servers', type: 'json', nullable: true })
-  mcpServers: McpServerConfig[] | null;
+  legacyMcpServers: McpServerConfig[] | null;
+
+  /** 关联的全局 MCP Server（agent_config_mcp_servers 关联表） */
+  @ManyToMany(() => McpServer)
+  @JoinTable({
+    name: 'agent_config_mcp_servers',
+    joinColumn: { name: 'agent_config_id', referencedColumnName: 'id' },
+    inverseJoinColumn: { name: 'mcp_server_id', referencedColumnName: 'id' },
+  })
+  mcpServers: McpServer[];
+
+  /** 关联的 Skill（agent_config_skills 关联表） */
+  @ManyToMany(() => Skill)
+  @JoinTable({
+    name: 'agent_config_skills',
+    joinColumn: { name: 'agent_config_id', referencedColumnName: 'id' },
+    inverseJoinColumn: { name: 'skill_id', referencedColumnName: 'id' },
+  })
+  skills: Skill[];
 
   /** 启用的内置工具名列表 */
   @Column({ name: 'enabled_tools', type: 'json', nullable: true })

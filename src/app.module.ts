@@ -5,6 +5,9 @@ import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { DailyReportsModule } from './daily-reports/daily-reports.module';
 import { AgentsModule } from './agents/agents.module';
+import { McpServersModule } from './mcp-servers/mcp-servers.module';
+import { SkillsModule } from './skills/skills.module';
+import { StockSignalsModule } from './stock-signals/stock-signals.module';
 
 @Module({
   imports: [
@@ -25,7 +28,7 @@ import { AgentsModule } from './agents/agents.module';
         password: configService.get('DB_PASSWORD', ''),
         database: configService.get('DB_DATABASE', 'tuanzi_server'),
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
-        synchronize: configService.get('NODE_ENV') !== 'production',
+        synchronize: false,
         logging: configService.get('NODE_ENV') === 'development',
       }),
       inject: [ConfigService],
@@ -35,6 +38,9 @@ import { AgentsModule } from './agents/agents.module';
     UsersModule,
     DailyReportsModule,
     AgentsModule,
+    McpServersModule,
+    SkillsModule,
+    StockSignalsModule,
   ],
 })
 export class AppModule {}
