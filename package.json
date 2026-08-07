@@ -17,7 +17,13 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "typeorm": "ts-node -r tsconfig-paths/register ./node_modules/typeorm/cli.js",
-    "prepare": "husky"
+    "prepare": "husky",
+    "migration:create": "pnpm typeorm migration:create",
+    "migration:generate": "pnpm typeorm migration:generate -d src/database/data-source.ts",
+    "migration:run": "pnpm typeorm migration:run -d src/database/data-source.ts",
+    "migration:revert": "pnpm typeorm migration:revert -d src/database/data-source.ts",
+    "migration:show": "pnpm typeorm migration:show -d src/database/data-source.ts",
+    "migration:run:prod": "node ./node_modules/typeorm/cli.js migration:run -d dist/database/data-source.js"
   },
   "dependencies": {
     "@langchain/anthropic": "^1.5.1",
@@ -41,6 +47,7 @@
     "class-validator": "^0.15.0",
     "cron": "4.4.0",
     "cron-parser": "^5.6.2",
+    "dotenv": "^17.4.2",
     "mysql2": "^3.14.0",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",

@@ -15,12 +15,14 @@ src/
   auth/           # 注册/登录/刷新令牌 + JwtStrategy（依赖 UsersModule）
   users/          # User 实体（含 role 字段）+ UsersService（无 controller，不暴露路由）
   daily-reports/  # 日报 CRUD，公开只读接口，无需鉴权
+  database/       # TypeORM CLI DataSource + migrations/（表结构变更唯一入口，synchronize 已全局关闭）
+  weekly-goals/   # 周目标：JWT 全鉴权 + userId 隔离；due_date/completed_at 用 SQL 时间函数写入（与 created_at 同数据库时钟，规避驱动时区转换偏差）；软删（DeleteDateColumn）
   agents/         # Agent 平台：配置 CRUD + 多轮会话 + LangGraph tool loop + MCP 工具 + SSE 流式
   uploads/        # ⚠️ 孤儿模块：MulterModule 磁盘存储配置，未在 app.module 注册
   common/         # guards/ decorators/ filters/（跨模块共享件）
 ```
 
-- 功能模块在 `src/app.module.ts` 注册，当前仅：`AuthModule`、`UsersModule`、`DailyReportsModule`、`AgentsModule`。新增模块必须手动加进 `imports`。
+- 功能模块在 `src/app.module.ts` 注册，当前：`AuthModule`、`UsersModule`、`DailyReportsModule`、`AgentsModule`、`McpServersModule`、`SkillsModule`、`StockSignalsModule`、`WeeklyGoalsModule`。新增模块必须手动加进 `imports`。
 - `uploads/` 目录（仓库根）存封面图，`main.ts` 静态服务在 `/uploads/` 前缀。文件上传端点随 novels 模块一起被删除；如需恢复上传，把 `UploadsModule` import 进使用方模块并配 `FileInterceptor`。
 - `agents/` 要点：**ChatModel 按 Agent 的数据库配置动态创建**（provider/model/apiKey 均落库，原 `src/llm/` 全局 env 配置模块已删除）；会话状态用 TypeORMCheckpointer（thread_id = conversationId）持久化；API Key AES-256-GCM 加密存储（密钥为必填环境变量 `AGENT_ENCRYPTION_KEY`，64 位 hex）；stdio 类型 MCP 仅 `role=admin` 用户可配置（首个管理员需手工 SQL 提权）；同一会话必须串行发消息（前端契约，后端未做行锁）。
 
@@ -37,6 +39,14 @@ pnpm typecheck            # tsc --noEmit 严格类型检查（tsconfig 已开 st
 pnpm test                 # 全部 jest 测试
 pnpm test -- auth.service # 按路径/模式跑单个测试
 pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
+
+# ---- 数据库 migration（TypeORM CLI，DataSource 在 src/database/data-source.ts）----
+pnpm migration:show       # 查看迁移执行状态（[X] 已执行 / [ ] 待执行）
+pnpm migration:run        # 执行所有待执行迁移（部署时也要跑）
+pnpm migration:revert     # 回滚最近一次迁移
+pnpm migration:generate src/database/migrations/<名称>  # 对比实体与库结构，自动生成迁移
+pnpm migration:create src/database/migrations/<名称>    # 生成空白迁移模板（手写 SQL 场景）
+pnpm migration:run:prod   # 生产环境：用编译后的 dist DataSource 跑迁移
 ```
 
 - API 前缀 `api`（`main.ts` 设置）；Swagger UI: `http://localhost:3000/api/docs`
@@ -56,7 +66,9 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 - 过期时间走环境变量 `JWT_EXPIRES_IN` / `JWT_REFRESH_EXPIRES_IN`（单位：秒，默认 7200 / 604800）。注意：env 读出来是字符串，代码里必须 `Number()` 转换，否则 jsonwebtoken 会把 `"7200"` 当成 7200 毫秒。
 - `JWT_SECRET` 为必填——`auth.module.ts` 与 `jwt.strategy.ts` 在缺失时会直接抛错（fail fast），不再有默认值兜底。
 - `JwtStrategy.validate` 返回**剔除密码的完整 user 实体**（查库确认用户存在后一次返回），controller 用 `@CurrentUser()` 直接获取，不要二次查库。
-- `synchronize: NODE_ENV !== 'production'`：开发环境改实体即自动改表，**不要写 migration**；生产环境绝不能开。
+- `synchronize` 已全局关闭（含开发环境）：表结构变更**一律走 migration**——改实体后跑 `pnpm migration:generate src/database/migrations/<名称>` 生成迁移，`pnpm migration:run` 执行，`migration:show` 确认状态。生产部署由 `deploy.sh` 在切换 app 容器前自动跑迁移（一次性容器 + `dist/database/data-source.js`），失败即中止、线上不受影响。
+- CLI 的 DataSource 独立于应用：`src/database/data-source.ts`（env 优先级 `.env.local` > `.env`，与 app 一致；连接参数改动需两边同步）。迁移文件统一放 `src/database/migrations/`。存量环境（表已存在、无迁移记录）上线必须按 `docs/plans/2026-08-07-migration-baseline.md` 做 baseline，禁止直接跑迁移。
+- 索引名在实体里显式命名（如 `@Index('IDX_weekly_goals_user_id')`）并与迁移保持一致，否则 TypeORM 哈希命名会让 `migration:generate` 误判漂移。
 - 实体通过 `**/*.entity{.ts,.js}` glob 自动发现，新实体放哪都会被加载。
 - 日报模块：只读接口（GET）公开，写接口（POST/PATCH/DELETE）必须 `@UseGuards(JwtAuthGuard)`。
 - Swagger 仅非生产环境注册；CORS 仅在配置 `CORS_ORIGINS` 时开启 credentials（`origin: '*'` 与 credentials 互斥）。
@@ -79,7 +91,7 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 ### ✅ 必须执行
 
 - 所有请求字段走 DTO + class-validator——全局 `ValidationPipe` 开了 `forbidNonWhitelisted`，DTO 未声明的字段会直接 400。
-- 新增实体字段后重启 dev server 让 synchronize 生效，然后用 Adminer（:8080）确认表结构。
+- 新增/修改实体字段后：跑 `pnpm migration:generate` 生成迁移并人工检查内容，再 `pnpm migration:run` 生效，用 Adminer（:8080）确认表结构。
 - 新模块/实体/服务写完跑 `pnpm lint` 和 `pnpm test`。
 
 ### ⚠️ 需先询问
