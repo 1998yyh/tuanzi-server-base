@@ -8,6 +8,7 @@ import { AgentsModule } from './agents/agents.module';
 import { McpServersModule } from './mcp-servers/mcp-servers.module';
 import { SkillsModule } from './skills/skills.module';
 import { StockSignalsModule } from './stock-signals/stock-signals.module';
+import { WeeklyGoalsModule } from './weekly-goals/weekly-goals.module';
 
 @Module({
   imports: [
@@ -28,7 +29,11 @@ import { StockSignalsModule } from './stock-signals/stock-signals.module';
         password: configService.get('DB_PASSWORD', ''),
         database: configService.get('DB_DATABASE', 'tuanzi_server'),
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
+        migrations: [__dirname + '/database/migrations/*{.ts,.js}'],
+        // synchronize 全局关闭：表结构变更一律走 migration（见 src/database/）
         synchronize: false,
+        // 应用启动不自动跑迁移，部署流程里显式执行 pnpm migration:run
+        migrationsRun: false,
         logging: configService.get('NODE_ENV') === 'development',
       }),
       inject: [ConfigService],
@@ -41,6 +46,7 @@ import { StockSignalsModule } from './stock-signals/stock-signals.module';
     McpServersModule,
     SkillsModule,
     StockSignalsModule,
+    WeeklyGoalsModule,
   ],
 })
 export class AppModule {}
