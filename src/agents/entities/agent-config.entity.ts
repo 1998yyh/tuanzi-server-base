@@ -14,16 +14,7 @@ import { User } from '../../users/users.entity';
 import { McpServer } from '../../mcp-servers/mcp-server.entity';
 import { Skill } from '../../skills/skill.entity';
 import { Conversation } from './conversation.entity';
-
-/**
- * LLM API 协议类型：决定用哪个 ChatModel 类（anthropic 原生协议 / openai 兼容协议）。
- * 扩展时在此添加，AgentExecutorService.createModelFromConfig 的 switch 分支同步更新。
- * 兼容 OpenAI 协议的服务（DeepSeek、one-api 等中转网关）一律用 openai + baseUrl 表达。
- */
-export enum ProviderType {
-  ANTHROPIC = 'anthropic',
-  OPENAI = 'openai',
-}
+import { AiChannel } from '../../ai-generation/entities/ai-channel.entity';
 
 /** @deprecated 旧 JSON 内联配置，已迁移到 mcp_servers 表；仅 legacyMcpServers 字段使用 */
 export interface McpServerConfig {
@@ -53,19 +44,17 @@ export class AgentConfig {
   @Column({ type: 'text', nullable: true })
   description: string | null;
 
-  @Column({ type: 'enum', enum: ProviderType })
-  provider: ProviderType;
+  /** 对话模型所属渠道（ai_channels.id；FK RESTRICT：被引用时禁止删除渠道） */
+  @ManyToOne(() => AiChannel, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'channel_id' })
+  channel: AiChannel;
 
-  @Column({ length: 100 })
-  model: string;
+  @Column({ name: 'channel_id' })
+  channelId: string;
 
-  /** AES-256-GCM 加密存储，绝不明文落库、绝不出现在 API 响应 */
-  @Column({ name: 'api_key_encrypted', type: 'text' })
-  apiKeyEncrypted: string;
-
-  /** 自定义 API 请求地址（中转网关/私有部署用），为空走 SDK 默认地址 */
-  @Column({ name: 'base_url', type: 'varchar', length: 500, nullable: true })
-  baseUrl: string | null;
+  /** 渠道下的对话模型名（capability=chat，「对话」用途） */
+  @Column({ name: 'model_name', length: 100 })
+  modelName: string;
 
   @Column({ name: 'system_prompt', type: 'text', nullable: true })
   systemPrompt: string | null;
