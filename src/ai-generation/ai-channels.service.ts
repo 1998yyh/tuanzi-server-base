@@ -6,9 +6,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { FindOptionsWhere, Repository } from 'typeorm';
 import { User } from '../users/users.entity';
 import { AGENT_ENCRYPTION_KEY } from '../agents/utils/encryption-key.provider';
+import { AgentConfig } from '../agents/entities/agent-config.entity';
 import { decrypt, encrypt, maskApiKey } from '../common/utils/crypto.util';
 import {
   AiChannel,
@@ -22,12 +23,23 @@ import { UpdateAiChannelDto } from './dto/update-ai-channel.dto';
 
 type CurrentUser = Omit<User, 'password'>;
 
+/** 对话模型解析结果（apiKey 已解密，只活在调用方栈帧） */
+export interface ResolvedChatModel {
+  channelId: string;
+  apiFormat: ApiFormat;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
 /** AI 生成渠道管理：CRUD + API Key 加解密（复用 Agent 模块的 AES-256-GCM 基础设施） */
 @Injectable()
 export class AiChannelsService {
   constructor(
     @InjectRepository(AiChannel)
     private readonly channelRepo: Repository<AiChannel>,
+    @InjectRepository(AgentConfig)
+    private readonly agentRepo: Repository<AgentConfig>,
     @Inject(AGENT_ENCRYPTION_KEY)
     private readonly encryptionKey: string,
   ) {}
@@ -97,6 +109,18 @@ export class AiChannelsService {
 
   async remove(user: CurrentUser, id: string): Promise<void> {
     const channel = await this.findOwned(id, user.id);
+    // 有启用中的 Agent 引用时禁止删除（DB 层还有 FK RESTRICT 兜底，这里是友好报错 + 引用者清单）
+    // TODO(Task 4): AgentConfig 补上 channelId 字段后此处断言可以移除（彼时字段进入实体类型）
+    const referencingAgents = await this.agentRepo.find({
+      where: { channelId: id, isActive: true } as FindOptionsWhere<AgentConfig>,
+      select: ['id', 'name'],
+    });
+    if (referencingAgents.length > 0) {
+      throw new BadRequestException({
+        message: `该渠道正被 ${referencingAgents.length} 个 Agent 引用，请先修改或删除相关 Agent`,
+        referencingAgents: referencingAgents.map((a) => ({ id: a.id, name: a.name })),
+      });
+    }
     await this.channelRepo.remove(channel);
   }
 
@@ -107,6 +131,40 @@ export class AiChannelsService {
       throw new NotFoundException(`AI 渠道 #${id} 不存在`);
     }
     return { channel, apiKey: decrypt(channel.apiKeyEncrypted, this.encryptionKey) };
+  }
+
+  /** 轻量查询（不解密）：供 Agent 响应拼装渠道名/格式 */
+  async getById(id: string): Promise<AiChannel | null> {
+    return this.channelRepo.findOne({ where: { id } });
+  }
+
+  /** 执行用：解析对话模型，做归属/启用/存在性/能力校验，返回解密后的渠道配置 */
+  async resolveChatModel(
+    userId: string,
+    channelId: string,
+    modelName: string,
+  ): Promise<ResolvedChatModel> {
+    const { channel, apiKey } = await this.findWithKey(channelId);
+    if (channel.userId !== userId) {
+      throw new ForbiddenException('只能使用自己的 AI 渠道');
+    }
+    if (!channel.isActive) {
+      throw new BadRequestException(`渠道 "${channel.name}" 已停用`);
+    }
+    const model = channel.models.find((m) => m.name === modelName);
+    if (!model) {
+      throw new BadRequestException(`渠道 "${channel.name}" 下不存在模型 "${modelName}"`);
+    }
+    if (model.capability !== ModelCapability.CHAT) {
+      throw new BadRequestException(`模型 "${modelName}" 的用途不是「对话」`);
+    }
+    return {
+      channelId: channel.id,
+      apiFormat: channel.apiFormat,
+      baseUrl: channel.baseUrl,
+      apiKey,
+      model: model.name,
+    };
   }
 
   private async findOwned(id: string, userId: string): Promise<AiChannel> {

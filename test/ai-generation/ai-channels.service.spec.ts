@@ -1,13 +1,14 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException, BadRequestException } from '@nestjs/common';
 import { AiChannelsService } from 'src/ai-generation/ai-channels.service';
 import {
   AiChannel,
   ApiFormat,
   ModelCapability,
 } from 'src/ai-generation/entities/ai-channel.entity';
+import { AgentConfig } from 'src/agents/entities/agent-config.entity';
 import { AGENT_ENCRYPTION_KEY } from 'src/agents/utils/encryption-key.provider';
 import { decrypt, encrypt } from 'src/common/utils/crypto.util';
 
@@ -16,6 +17,7 @@ const TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd
 describe('AiChannelsService', () => {
   let service: AiChannelsService;
   let repo: jest.Mocked<Repository<AiChannel>>;
+  let agentRepo: jest.Mocked<Repository<AgentConfig>>;
 
   const user = { id: 'user-1' };
 
@@ -48,11 +50,16 @@ describe('AiChannelsService', () => {
           },
         },
         { provide: AGENT_ENCRYPTION_KEY, useValue: TEST_KEY },
+        {
+          provide: getRepositoryToken(AgentConfig),
+          useValue: { find: jest.fn(async () => []) },
+        },
       ],
     }).compile();
 
     service = module.get(AiChannelsService);
     repo = module.get(getRepositoryToken(AiChannel));
+    agentRepo = module.get(getRepositoryToken(AgentConfig));
     jest.clearAllMocks();
   });
 
@@ -184,6 +191,89 @@ describe('AiChannelsService', () => {
           models: [{ name: 'gemini-2.5-pro', capability: ModelCapability.CHAT }],
         }),
       ).rejects.toThrow('不支持「对话」用途');
+    });
+  });
+
+  describe('resolveChatModel', () => {
+    const chatChannel: AiChannel = {
+      ...channel,
+      models: [
+        { name: 'gpt-5', capability: ModelCapability.CHAT },
+        { name: 'gpt-image-2', capability: ModelCapability.IMAGE },
+      ],
+    };
+
+    beforeEach(() => {
+      chatChannel.apiKeyEncrypted = encrypt('sk-plain-key', TEST_KEY);
+      repo.findOne.mockResolvedValue(chatChannel);
+    });
+
+    it('返回解密后的渠道配置与模型名', async () => {
+      const resolved = await service.resolveChatModel('user-1', 'ch-1', 'gpt-5');
+      expect(resolved).toEqual({
+        channelId: 'ch-1',
+        apiFormat: ApiFormat.OPENAI,
+        baseUrl: 'https://api.openai.com',
+        apiKey: 'sk-plain-key',
+        model: 'gpt-5',
+      });
+    });
+
+    it('渠道归属他人时抛 ForbiddenException', async () => {
+      await expect(service.resolveChatModel('user-2', 'ch-1', 'gpt-5')).rejects.toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('渠道停用时抛 BadRequestException', async () => {
+      repo.findOne.mockResolvedValue({ ...chatChannel, isActive: false });
+      await expect(service.resolveChatModel('user-1', 'ch-1', 'gpt-5')).rejects.toThrow('已停用');
+    });
+
+    it('模型不存在时抛 BadRequestException', async () => {
+      await expect(service.resolveChatModel('user-1', 'ch-1', 'not-exists')).rejects.toThrow(
+        '不存在模型',
+      );
+    });
+
+    it('模型用途不是「对话」时抛 BadRequestException', async () => {
+      await expect(service.resolveChatModel('user-1', 'ch-1', 'gpt-image-2')).rejects.toThrow(
+        '的用途不是「对话」',
+      );
+    });
+  });
+
+  describe('remove 引用保护', () => {
+    it('有启用中的 Agent 引用时拒绝删除，并带出引用者清单', async () => {
+      repo.findOne.mockResolvedValue(channel);
+      agentRepo.find.mockResolvedValue([
+        { id: 'a-1', name: '客服助手' },
+        { id: 'a-2', name: '翻译助手' },
+      ] as AgentConfig[]);
+      let thrown: unknown;
+      try {
+        await service.remove(user as never, 'ch-1');
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(BadRequestException);
+      const res = (thrown as BadRequestException).getResponse() as {
+        message: string;
+        referencingAgents: Array<{ id: string; name: string }>;
+      };
+      expect(res.message).toContain('2 个 Agent 引用');
+      expect(res.referencingAgents).toEqual([
+        { id: 'a-1', name: '客服助手' },
+        { id: 'a-2', name: '翻译助手' },
+      ]);
+      expect(repo.remove).not.toHaveBeenCalled();
+    });
+
+    it('无引用时正常删除', async () => {
+      repo.findOne.mockResolvedValue(channel);
+      agentRepo.find.mockResolvedValue([]);
+      await service.remove(user as never, 'ch-1');
+      expect(repo.remove).toHaveBeenCalledWith(channel);
     });
   });
 });
