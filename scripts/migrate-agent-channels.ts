@@ -99,10 +99,34 @@ async function main(): Promise<void> {
          ADD COLUMN channel_id VARCHAR(36) NULL AFTER base_url,
          ADD COLUMN model_name VARCHAR(100) NULL AFTER channel_id`,
     );
-    // 旧四列本阶段不动，由 --drop-legacy 在验收通过后统一删除
+    // 旧四列本阶段不删，由 --drop-legacy 在验收通过后统一删除
     console.log('Phase A：DDL 完成');
   } else {
     console.log('Phase A：channel_id 已存在，跳过 DDL');
+  }
+
+  // ── Phase A2：放宽旧四列 NOT NULL（独立探测，幂等）──
+  // 实体已删除旧字段，新代码 INSERT 不再提供这些列；若不放宽约束，
+  // 「验收 → --drop-legacy」窗口期内新建 Agent 必报 ER_NO_DEFAULT_FOR_FIELD。
+  const LEGACY_RELAX: Array<[string, string]> = [
+    ['provider', `ENUM('anthropic','openai','deepseek') NULL`],
+    ['model', 'VARCHAR(100) NULL'],
+    ['api_key_encrypted', 'TEXT NULL'],
+    ['base_url', 'VARCHAR(500) NULL'],
+  ];
+  const legacyCols = await ds.query<Array<{ Field: string; Null: string }>>(
+    `SHOW COLUMNS FROM agent_configs WHERE Field IN ('provider','model','api_key_encrypted','base_url')`,
+  );
+  const toRelax = LEGACY_RELAX.filter(([name]) =>
+    legacyCols.some((c) => c.Field === name && c.Null === 'NO'),
+  );
+  if (toRelax.length > 0) {
+    for (const [name, def] of toRelax) {
+      await ds.query(`ALTER TABLE agent_configs MODIFY COLUMN ${name} ${def}`);
+    }
+    console.log(`Phase A2：旧列 ${toRelax.map(([n]) => n).join(', ')} 已放宽为 NULL`);
+  } else {
+    console.log('Phase A2：旧列均已为 NULL 或已删除，跳过');
   }
 
   // ── Phase B：存量数据物化（同一 user+provider+baseUrl+key 去重为一个渠道，model 逐个追加）──
