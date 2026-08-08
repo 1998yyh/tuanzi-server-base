@@ -62,7 +62,10 @@ export class AgentsController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: '更新 Agent 配置', description: 'apiKey 不传则保持原值' })
+  @ApiOperation({
+    summary: '更新 Agent 配置',
+    description: '部分更新；channelId/modelName 传其一时按合并后组合校验',
+  })
   @ApiResponse({ status: 200, description: '更新成功', type: AgentResponseDto })
   @ApiResponse({ status: 404, description: 'Agent 不存在' })
   async update(

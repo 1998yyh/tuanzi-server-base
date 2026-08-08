@@ -2,8 +2,10 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
 import { AgentsService } from 'src/agents/agents.service';
 import { AgentConfig } from 'src/agents/entities/agent-config.entity';
+import { UpdateAgentDto } from 'src/agents/dto/update-agent.dto';
 import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
 import { SkillsService } from 'src/skills/skills.service';
 import { McpServer, McpServerType } from 'src/mcp-servers/mcp-server.entity';
@@ -37,7 +39,7 @@ describe('AgentsService', () => {
     channelId: 'ch-1',
     modelName: 'claude-opus-4-8',
     systemPrompt: '你是客服',
-    maxTokens: 4096,
+    maxTokens: 8192,
     maxIterations: 10,
     enabledTools: ['web_search'],
     legacyMcpServers: null,
@@ -194,6 +196,18 @@ describe('AgentsService', () => {
       await service.update(normalUser, 'agent-1', { modelName: 'gpt-5' });
       // 合并校验：channelId 用现值
       expect(aiChannelsService.resolveChatModel).toHaveBeenCalledWith('user-1', 'ch-1', 'gpt-5');
+    });
+
+    it('部分更新不重置 maxTokens/maxIterations（模拟 class-transformer 实例化路径）', async () => {
+      // plainToInstance 会让 DTO 默认值成为自有属性——这是 HTTP 管线的真实形态
+      repo.findOne.mockResolvedValue({ ...baseAgent });
+      const dto = plainToInstance(UpdateAgentDto, { name: '改名' });
+      const saved = await service.update(normalUser, 'agent-1', dto);
+      // fixture 的 maxTokens 为非默认值 8192，断言保持原值；同时响应 JSON 不丢键
+      expect(saved.maxTokens).toBe(baseAgent.maxTokens);
+      expect(saved.maxIterations).toBe(baseAgent.maxIterations);
+      expect(saved).toHaveProperty('channelId');
+      expect(saved).toHaveProperty('modelName');
     });
   });
 

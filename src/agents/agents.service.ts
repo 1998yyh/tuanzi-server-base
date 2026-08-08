@@ -86,7 +86,19 @@ export class AgentsService {
         dto.modelName ?? agent.modelName,
       );
     }
-    Object.assign(agent, dto);
+
+    // 显式逐字段赋值，不用 Object.assign：class-transformer 实例化会带上
+    // maxTokens/maxIterations 默认值与 undefined 自有属性，直接 assign 会把
+    // 未传字段静默重置/丢键
+    if (dto.name !== undefined) agent.name = dto.name;
+    if (dto.description !== undefined) agent.description = dto.description;
+    if (dto.channelId !== undefined) agent.channelId = dto.channelId;
+    if (dto.modelName !== undefined) agent.modelName = dto.modelName;
+    if (dto.systemPrompt !== undefined) agent.systemPrompt = dto.systemPrompt;
+    if (dto.maxTokens !== undefined) agent.maxTokens = dto.maxTokens;
+    if (dto.maxIterations !== undefined) agent.maxIterations = dto.maxIterations;
+    if (dto.enabledTools !== undefined) agent.enabledTools = dto.enabledTools;
+
     const saved = await this.agentRepo.save(agent);
     return this.toResponse(saved);
   }

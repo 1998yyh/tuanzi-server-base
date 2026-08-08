@@ -41,7 +41,7 @@ export class CreateAgentDto {
   @Max(200000)
   @Type(() => Number)
   @IsOptional()
-  maxTokens?: number = 4096;
+  maxTokens?: number;
 
   @ApiProperty({
     required: false,
@@ -54,7 +54,7 @@ export class CreateAgentDto {
   @Max(50)
   @Type(() => Number)
   @IsOptional()
-  maxIterations?: number = 10;
+  maxIterations?: number;
 
   @ApiProperty({
     required: false,
