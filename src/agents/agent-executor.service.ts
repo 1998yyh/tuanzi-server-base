@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { Annotation, END, START, StateGraph, messagesStateReducer } from '@langchain/langgraph';
 import {
   AIMessage,
@@ -13,15 +13,15 @@ import { StructuredToolInterface } from '@langchain/core/tools';
 import { StreamEvent } from '@langchain/core/tracers/log_stream';
 import { ChatAnthropic } from '@langchain/anthropic';
 import { ChatOpenAI } from '@langchain/openai';
-import { AgentConfig, ProviderType } from './entities/agent-config.entity';
+import { AgentConfig } from './entities/agent-config.entity';
 import { MessageRole } from './entities/message.entity';
 import { ToolRegistryService } from './tools/tool-registry.service';
 import { McpServersService } from '../mcp-servers/mcp-servers.service';
 import { SkillToolFactory } from '../skills/skill-tool.factory';
 import { Skill } from '../skills/skill.entity';
 import { TypeORMCheckpointer } from './checkpointers/typeorm.checkpointer';
-import { AGENT_ENCRYPTION_KEY } from './utils/encryption-key.provider';
-import { decrypt } from './utils/crypto.util';
+import { AiChannelsService, ResolvedChatModel } from '../ai-generation/ai-channels.service';
+import { ApiFormat } from '../ai-generation/entities/ai-channel.entity';
 import { NewMessageData, SseEvent } from './agents.types';
 
 /** 单个工具最长执行时间，超时视为失败让 LLM 决策 */
@@ -79,10 +79,9 @@ export class AgentExecutorService {
   constructor(
     private readonly toolRegistry: ToolRegistryService,
     private readonly checkpointer: TypeORMCheckpointer,
-    @Inject(AGENT_ENCRYPTION_KEY)
-    private readonly encryptionKey: string,
     private readonly mcpServersService: McpServersService,
     private readonly skillToolFactory: SkillToolFactory,
+    private readonly aiChannelsService: AiChannelsService,
   ) {}
 
   /**
@@ -94,7 +93,7 @@ export class AgentExecutorService {
     userMessage: string,
   ): Promise<NewMessageData[]> {
     const tools = await this.getAllTools(agentConfig);
-    const graph = this.buildGraph(agentConfig, tools);
+    const graph = await this.buildGraph(agentConfig, tools);
     const config = { configurable: { thread_id: conversationId } };
 
     // 记录调用前的消息数：invoke 返回的 messages 含完整历史（Checkpointer 恢复的
@@ -134,7 +133,7 @@ export class AgentExecutorService {
     userMessage: string,
   ): AsyncGenerator<SseEvent> {
     const tools = await this.getAllTools(agentConfig);
-    const graph = this.buildGraph(agentConfig, tools);
+    const graph = await this.buildGraph(agentConfig, tools);
 
     const stream = graph.streamEvents(
       {
@@ -188,7 +187,7 @@ export class AgentExecutorService {
     const tools =
       options.overrideTools ??
       (await this.getAllTools(agentConfig, options.isSkillExecution ?? false));
-    const graph = this.buildGraph(
+    const graph = await this.buildGraph(
       { ...agentConfig, systemPrompt: options.overrideSystemPrompt ?? agentConfig.systemPrompt },
       tools,
       false,
@@ -259,14 +258,14 @@ export class AgentExecutorService {
     );
   }
 
-  private buildGraph(
+  private async buildGraph(
     config: AgentConfig,
     tools: StructuredToolInterface[],
     useCheckpointer = true,
   ) {
-    const model = this.createModelFromConfig(config);
+    const model = await this.createModelFromConfig(config);
     if (tools.length && !model.bindTools) {
-      throw new BadRequestException(`模型 ${config.model} 不支持工具调用，请关闭工具配置`);
+      throw new BadRequestException(`模型 ${config.modelName} 不支持工具调用，请关闭工具配置`);
     }
     const modelWithTools = tools.length ? model.bindTools!(tools) : model;
     // 系统级时间戳元数据（Kimi 风格）：graph 每次调用都重建，时间戳随每轮用户消息刷新；
@@ -356,27 +355,30 @@ export class AgentExecutorService {
     return `${datetime} +08:00`;
   }
 
-  /** 按 Agent 配置创建 ChatModel；解密结果只活在函数栈帧 */
-  private createModelFromConfig(config: AgentConfig): BaseChatModel {
-    const apiKey = decrypt(config.apiKeyEncrypted, this.encryptionKey);
-    switch (config.provider) {
-      case ProviderType.ANTHROPIC:
+  /** 按 Agent 引用的渠道创建 ChatModel；解密结果只活在函数栈帧 */
+  private async createModelFromConfig(config: AgentConfig): Promise<BaseChatModel> {
+    const resolved: ResolvedChatModel = await this.aiChannelsService.resolveChatModel(
+      config.userId,
+      config.channelId,
+      config.modelName,
+    );
+    switch (resolved.apiFormat) {
+      case ApiFormat.ANTHROPIC:
         return new ChatAnthropic({
-          apiKey,
-          model: config.model,
+          apiKey: resolved.apiKey,
+          model: resolved.model,
           maxTokens: config.maxTokens,
-          // 传了 baseUrl 就覆盖 SDK 默认地址（中转网关/私有部署场景）
-          ...(config.baseUrl ? { anthropicApiUrl: config.baseUrl } : {}),
+          anthropicApiUrl: resolved.baseUrl,
         });
-      case ProviderType.OPENAI:
+      case ApiFormat.OPENAI:
         return new ChatOpenAI({
-          apiKey,
-          model: config.model,
+          apiKey: resolved.apiKey,
+          model: resolved.model,
           maxTokens: config.maxTokens,
-          ...(config.baseUrl ? { configuration: { baseURL: config.baseUrl } } : {}),
+          configuration: { baseURL: resolved.baseUrl },
         });
       default:
-        throw new BadRequestException(`暂不支持的 provider: ${config.provider}`);
+        throw new BadRequestException(`渠道格式 "${resolved.apiFormat}" 不支持对话`);
     }
   }
 
