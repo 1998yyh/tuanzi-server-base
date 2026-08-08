@@ -74,7 +74,7 @@ export class AiChannelsService {
         baseUrl: dto.baseUrl,
         apiKeyEncrypted: encrypt(dto.apiKey, this.encryptionKey),
         models: dto.models,
-        isActive: true,
+        isActive: dto.isActive ?? true,
       }),
     );
     return this.toView(channel);
