@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from '../users/users.entity';
@@ -11,36 +11,42 @@ import { CreateAgentDto } from './dto/create-agent.dto';
 import { UpdateAgentDto } from './dto/update-agent.dto';
 import { QueryAgentsDto } from './dto/query-agents.dto';
 import { AgentResponseDto } from './dto/agent-response.dto';
-import { AGENT_ENCRYPTION_KEY } from './utils/encryption-key.provider';
-import { decrypt, encrypt, maskApiKey } from './utils/crypto.util';
+import { AiChannelsService } from '../ai-generation/ai-channels.service';
 
 type CurrentUser = Omit<User, 'password'>;
 
 /**
- * Agent 配置业务逻辑：CRUD + API Key 加解密 + 多用户隔离。
+ * Agent 配置业务逻辑：CRUD + 渠道校验 + 多用户隔离。
  *
  * 安全约定：
  * - 所有查询按 userId 过滤，查不到统一抛 404（不区分「不存在」与「别人的」）
- * - API Key 写入前 AES-256-GCM 加密，响应只返回脱敏后 4 位
+ * - 对话模型配置收敛到 AI 渠道（channelId + modelName），创建/更新前经
+ *   AiChannelsService.resolveChatModel 校验渠道归属/启用/「对话」用途；
+ *   API Key 密文只存在于渠道侧，本服务不碰加解密
  */
 @Injectable()
 export class AgentsService {
   constructor(
     @InjectRepository(AgentConfig)
     private readonly agentRepo: Repository<AgentConfig>,
-    @Inject(AGENT_ENCRYPTION_KEY)
-    private readonly encryptionKey: string,
     private readonly mcpServersService: McpServersService,
     private readonly skillsService: SkillsService,
+    private readonly aiChannelsService: AiChannelsService,
   ) {}
 
   async create(user: CurrentUser, dto: CreateAgentDto): Promise<AgentResponseDto> {
-    const { apiKey, ...rest } = dto;
+    // 渠道归属/启用/「对话」用途校验（失败抛 400/403，由全局过滤器转响应）
+    await this.aiChannelsService.resolveChatModel(user.id, dto.channelId, dto.modelName);
     const agent = await this.agentRepo.save(
       this.agentRepo.create({
-        ...rest,
         userId: user.id,
-        apiKeyEncrypted: encrypt(apiKey, this.encryptionKey),
+        name: dto.name,
+        description: dto.description ?? null,
+        channelId: dto.channelId,
+        modelName: dto.modelName,
+        systemPrompt: dto.systemPrompt ?? null,
+        maxTokens: dto.maxTokens ?? 4096,
+        maxIterations: dto.maxIterations ?? 10,
         enabledTools: dto.enabledTools ?? [],
       }),
     );
@@ -56,7 +62,7 @@ export class AgentsService {
       take: limit,
     });
     return {
-      items: items.map((a) => this.toResponse(a)),
+      items: await Promise.all(items.map((a) => this.toResponse(a))),
       total,
       page,
       limit,
@@ -72,11 +78,15 @@ export class AgentsService {
   async update(user: CurrentUser, id: string, dto: UpdateAgentDto): Promise<AgentResponseDto> {
     const agent = await this.findOwnedOrFail(user.id, id);
 
-    const { apiKey, ...rest } = dto;
-    Object.assign(agent, rest);
-    if (apiKey) {
-      agent.apiKeyEncrypted = encrypt(apiKey, this.encryptionKey);
+    // channelId/modelName 传其一时，按「合并后」的组合校验
+    if (dto.channelId !== undefined || dto.modelName !== undefined) {
+      await this.aiChannelsService.resolveChatModel(
+        user.id,
+        dto.channelId ?? agent.channelId,
+        dto.modelName ?? agent.modelName,
+      );
     }
+    Object.assign(agent, dto);
     const saved = await this.agentRepo.save(agent);
     return this.toResponse(saved);
   }
@@ -130,17 +140,17 @@ export class AgentsService {
     return agent;
   }
 
-  /** 响应脱敏：显式挑选字段，密文与 userId 不出现在响应中 */
-  private toResponse(agent: AgentConfig): AgentResponseDto {
-    const plaintext = decrypt(agent.apiKeyEncrypted, this.encryptionKey);
+  /** 响应拼装：channelName/apiFormat 来自渠道轻量查询（不解密），密文绝不出现 */
+  private async toResponse(agent: AgentConfig): Promise<AgentResponseDto> {
+    const channel = await this.aiChannelsService.getById(agent.channelId);
     return {
       id: agent.id,
       name: agent.name,
       description: agent.description,
-      provider: agent.provider,
-      model: agent.model,
-      apiKeyMasked: maskApiKey(plaintext),
-      baseUrl: agent.baseUrl ?? null,
+      channelId: agent.channelId,
+      channelName: channel?.name ?? null,
+      apiFormat: channel?.apiFormat ?? null,
+      modelName: agent.modelName,
       systemPrompt: agent.systemPrompt,
       maxTokens: agent.maxTokens,
       maxIterations: agent.maxIterations,

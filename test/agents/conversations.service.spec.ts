@@ -3,7 +3,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { GoneException, NotFoundException } from '@nestjs/common';
 import { ConversationsService } from 'src/agents/conversations.service';
-import { AgentConfig, ProviderType } from 'src/agents/entities/agent-config.entity';
+import { AgentConfig } from 'src/agents/entities/agent-config.entity';
 import { Conversation } from 'src/agents/entities/conversation.entity';
 import { Message, MessageRole } from 'src/agents/entities/message.entity';
 import { AgentExecutorService } from 'src/agents/agent-executor.service';
@@ -22,9 +22,8 @@ describe('ConversationsService', () => {
     id: 'agent-1',
     userId: 'user-1',
     name: '助手',
-    provider: ProviderType.ANTHROPIC,
-    model: 'claude-opus-4-8',
-    apiKeyEncrypted: 'encrypted',
+    channelId: 'ch-1',
+    modelName: 'claude-opus-4-8',
     isActive: true,
   } as AgentConfig;
 

@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { ToolRegistryService } from 'src/agents/tools/tool-registry.service';
-import { AgentConfig, ProviderType } from 'src/agents/entities/agent-config.entity';
+import { AgentConfig } from 'src/agents/entities/agent-config.entity';
 import { McpServerRuntimeConfig, McpServerType } from 'src/mcp-servers/mcp-server.entity';
 
 // 这些 mock 必须在 import 之前声明，jest.mock 会被提升到顶部。
@@ -49,7 +49,8 @@ describe('ToolRegistryService', () => {
     ({
       id: 'agent-1',
       name: '测试助手',
-      provider: ProviderType.ANTHROPIC,
+      channelId: 'ch-1',
+      modelName: 'claude-opus-4-8',
       enabledTools: [],
       ...override,
     }) as AgentConfig;
