@@ -19,7 +19,7 @@ import { CreateMcpServerDto } from './dto/create-mcp-server.dto';
 import { UpdateMcpServerDto } from './dto/update-mcp-server.dto';
 import { QueryMcpServerDto } from './dto/query-mcp-server.dto';
 import { AGENT_ENCRYPTION_KEY } from '../agents/utils/encryption-key.provider';
-import { decrypt, encrypt } from '../agents/utils/crypto.util';
+import { decrypt, encrypt } from '../common/utils/crypto.util';
 
 type CurrentUser = Omit<User, 'password'>;
 

@@ -1,5 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { assertEncryptionKey } from './crypto.util';
+import { assertEncryptionKey } from '../../common/utils/crypto.util';
 
 /** API Key 加密密钥的注入 token（值为 64 位 hex 字符串） */
 export const AGENT_ENCRYPTION_KEY = Symbol('AGENT_ENCRYPTION_KEY');

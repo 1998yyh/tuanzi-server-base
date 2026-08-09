@@ -10,7 +10,7 @@ import {
 import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
 import { McpServer, McpServerType } from 'src/mcp-servers/mcp-server.entity';
 import { AGENT_ENCRYPTION_KEY } from 'src/agents/utils/encryption-key.provider';
-import { decrypt } from 'src/agents/utils/crypto.util';
+import { decrypt } from 'src/common/utils/crypto.util';
 import { UserRole } from 'src/users/users.entity';
 
 const TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
@@ -227,8 +227,8 @@ describe('McpServersService', () => {
       server.envEncrypted = (() => {
         // 用真实 encrypt 生成密文
         const { encrypt } = jest.requireActual(
-          'src/agents/utils/crypto.util',
-        ) as typeof import('src/agents/utils/crypto.util');
+          'src/common/utils/crypto.util',
+        ) as typeof import('src/common/utils/crypto.util');
         return encrypt(JSON.stringify({ ROOT: '/tmp' }), TEST_KEY);
       })();
 
@@ -247,8 +247,8 @@ describe('McpServersService', () => {
   describe('findByAgentConfig', () => {
     it('应通过关联表查询，过滤停用 server，并解密 env', async () => {
       const { encrypt } = jest.requireActual(
-        'src/agents/utils/crypto.util',
-      ) as typeof import('src/agents/utils/crypto.util');
+        'src/common/utils/crypto.util',
+      ) as typeof import('src/common/utils/crypto.util');
       const activeStdio: McpServer = {
         ...sseServer,
         id: 'srv-stdio',
