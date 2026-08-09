@@ -10,7 +10,7 @@ import {
 import { SkillsService } from 'src/skills/skills.service';
 import { Skill } from 'src/skills/skill.entity';
 import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
-import { UserRole } from 'src/users/users.entity';
+import { User, UserRole } from 'src/users/users.entity';
 
 describe('SkillsService', () => {
   let service: SkillsService;
@@ -67,6 +67,10 @@ describe('SkillsService', () => {
           },
         },
         { provide: McpServersService, useValue: mcpServersService },
+        {
+          provide: getRepositoryToken(User),
+          useValue: { findOne: jest.fn() },
+        },
       ],
     }).compile();
 

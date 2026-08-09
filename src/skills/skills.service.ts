@@ -3,7 +3,9 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
+  OnApplicationBootstrap,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
@@ -12,21 +14,68 @@ import { Skill, SkillView } from './skill.entity';
 import { CreateSkillDto } from './dto/create-skill.dto';
 import { UpdateSkillDto } from './dto/update-skill.dto';
 import { McpServersService } from '../mcp-servers/mcp-servers.service';
-import { ALL_BUILTIN_TOOL_NAMES } from '../agents/tools/tool-names';
+import { ALL_BUILTIN_TOOL_NAMES, CANVAS_TOOL_NAMES } from '../agents/tools/tool-names';
 
 type CurrentUser = Omit<User, 'password'>;
+
+/** 「画布助手」内置 Skill 名称（种子幂等键） */
+export const CANVAS_ASSISTANT_SKILL_NAME = 'canvas_assistant';
+
+// 指令改写自 infinite-canvas canvas-agent/agent-instructions.md
+// （https://github.com/basketikun/infinite-canvas, AGPL-3.0）：浏览器 MCP 词汇 → 后端工具词汇
+const CANVAS_ASSISTANT_SYSTEM_PROMPT = `# 画布助手
+
+你正在帮助用户操作无限画布工作台：创建/编辑节点、连线、AI 生成图片/视频/音频、提示词与素材管理。
+
+- 操作画布前先确认目标画布：用户没明说时用 canvas_list_projects 列出并选择；拿到 projectId 后用 canvas_get_state 读取现状再执行修改。
+- 修改画布用对应的 canvas_* 工具；复杂批量改动用 canvas_apply_ops 一次提交。
+- 用户要求生成图片/视频/音频时：用 canvas_create_image_prompt_flow 或 canvas_create_config_node（autoRun=true）创建流程并触发生成，或对已有配置节点用 canvas_run_generation。
+- 配置节点需要 metadata.model（"channelId::modelName"）。用户没指定模型时，说明需要先配置模型，不要臆造 modelRef。
+- 参考图：把图片节点用 canvas_connect_nodes 连到配置节点，即自动作为参考素材。
+- 视频生成是异步任务：提交后返回 taskId，用 generation_get_status 查询进度；任务未完成时不要声称"已生成"。
+- 找提示词灵感用 prompts_search；保存/查看素材用 assets_add / assets_list。
+- 需要生成内容时直接调用对应工具，不要要求用户手动复制 JSON。`;
 
 /**
  * 全局 Skills 库管理：CRUD + 权限（修改/删除限创建者或 admin）。
  * Skill 库全局可见，任何登录用户可把启用中的 Skill 关联到自己的 Agent。
  */
 @Injectable()
-export class SkillsService {
+export class SkillsService implements OnApplicationBootstrap {
+  private readonly logger = new Logger(SkillsService.name);
+
   constructor(
     @InjectRepository(Skill)
     private readonly skillRepo: Repository<Skill>,
+    @InjectRepository(User)
+    private readonly userRepo: Repository<User>,
     private readonly mcpServersService: McpServersService,
   ) {}
+
+  /** 「画布助手」内置 Skill 幂等种子：挂在首个 admin 名下（无用户时跳过，下次启动再试） */
+  async onApplicationBootstrap(): Promise<void> {
+    const existing = await this.skillRepo.findOne({ where: { name: CANVAS_ASSISTANT_SKILL_NAME } });
+    if (existing) return;
+    const admin = await this.userRepo.findOne({ where: { role: UserRole.ADMIN } });
+    if (!admin) {
+      this.logger.warn('暂无 admin 用户，画布助手 Skill 种子跳过（下次启动重试）');
+      return;
+    }
+    await this.skillRepo.save(
+      this.skillRepo.create({
+        name: CANVAS_ASSISTANT_SKILL_NAME,
+        description:
+          '无限画布工作台助手：创建/编辑画布节点、连线，AI 生成图片/视频/音频，搜索提示词库，管理素材',
+        systemPrompt: CANVAS_ASSISTANT_SYSTEM_PROMPT,
+        inputSchema: null,
+        enabledTools: [...CANVAS_TOOL_NAMES],
+        isActive: true,
+        mcpServers: [],
+        createdBy: admin.id,
+      }),
+    );
+    this.logger.log('已种子化内置 Skill「画布助手」');
+  }
 
   async create(user: CurrentUser, dto: CreateSkillDto): Promise<SkillView> {
     await this.assertNameAvailable(dto.name);
