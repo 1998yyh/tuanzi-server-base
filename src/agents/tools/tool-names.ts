@@ -9,12 +9,36 @@
 /** 无状态内置工具（ToolRegistryService.onModuleInit 实例化） */
 export const BUILTIN_TOOL_NAMES = ['web_search', 'calculator'] as const;
 
-/** Agent 作用域内置工具（按 agentConfigId 动态创建；第三期定时任务工具在此注册） */
+/** 画布工具名（CanvasToolsService 注册的 Agent 作用域工具） */
+export const CANVAS_TOOL_NAMES: readonly string[] = [
+  'canvas_list_projects',
+  'canvas_get_state',
+  'canvas_create_node',
+  'canvas_create_text_node',
+  'canvas_create_text_nodes',
+  'canvas_create_config_node',
+  'canvas_create_image_prompt_flow',
+  'canvas_update_node',
+  'canvas_update_node_text',
+  'canvas_move_nodes',
+  'canvas_resize_node',
+  'canvas_delete_nodes',
+  'canvas_connect_nodes',
+  'canvas_apply_ops',
+  'canvas_run_generation',
+  'generation_get_status',
+  'prompts_search',
+  'assets_list',
+  'assets_add',
+];
+
+/** Agent 作用域内置工具（按 agentConfigId 动态创建） */
 export const AGENT_SCOPED_TOOL_NAMES: readonly string[] = [
   'create_scheduled_task',
   'write_daily_report',
   'list_scheduled_tasks',
   'delete_scheduled_task',
+  ...CANVAS_TOOL_NAMES,
 ];
 
 /** 全部可启用的内置工具名（Skill.enabledTools 等校验用） */

@@ -19,6 +19,11 @@ import { SkillsModule } from '../skills/skills.module';
 import { DailyReportsModule } from '../daily-reports/daily-reports.module';
 import { ScheduledTask } from './scheduled-tasks/scheduled-task.entity';
 import { ScheduledTasksService } from './scheduled-tasks/scheduled-tasks.service';
+import { CanvasToolsService } from './tools/canvas/canvas-tools.service';
+import { CanvasModule } from '../canvas/canvas.module';
+import { AiGenerationModule } from '../ai-generation/ai-generation.module';
+import { PromptsModule } from '../prompts/prompts.module';
+import { AssetsModule } from '../assets/assets.module';
 
 @Module({
   imports: [
@@ -34,6 +39,11 @@ import { ScheduledTasksService } from './scheduled-tasks/scheduled-tasks.service
     McpServersModule,
     SkillsModule,
     DailyReportsModule,
+    // 画布工具依赖：canvas/ai-generation/prompts/assets（依赖方向 agents → 各模块，无环）
+    CanvasModule,
+    AiGenerationModule,
+    PromptsModule,
+    AssetsModule,
   ],
   controllers: [AgentsController, ConversationsController],
   providers: [
@@ -43,6 +53,7 @@ import { ScheduledTasksService } from './scheduled-tasks/scheduled-tasks.service
     ToolRegistryService,
     TypeORMCheckpointer,
     ScheduledTasksService,
+    CanvasToolsService,
     encryptionKeyProvider,
   ],
 })
