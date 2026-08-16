@@ -50,7 +50,7 @@ export class McpServersController {
   @Patch(':id')
   @ApiOperation({
     summary: '更新 MCP Server',
-    description: '仅创建者或管理员；env/headers 不传则保持原值',
+    description: '仅创建者或管理员；env/headers 不传则保持原值；isActive=false 停用、true 重新启用',
   })
   @ApiResponse({ status: 200, description: '更新成功' })
   @ApiResponse({ status: 403, description: '非创建者且非管理员' })

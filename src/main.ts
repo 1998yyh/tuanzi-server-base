@@ -2,15 +2,29 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import { json, urlencoded } from 'express';
 import { join } from 'path';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    // 关闭默认 bodyParser，手动配置以放宽 JSON 上限：
+    // 画布文档是单列大 JSON，express 默认 100kb 会成为「无限画布」保存的隐性天花板
+    bodyParser: false,
+  });
+
+  app.use(json({ limit: '5mb' }));
+  app.use(urlencoded({ extended: true, limit: '5mb' }));
 
   // 静态文件服务 - 封面上传
   app.useStaticAssets(join(__dirname, '..', 'uploads'), {
     prefix: '/uploads/',
+    setHeaders: (res) => {
+      // 存储型 XSS 防护：禁止浏览器嗅探响应类型、禁用脚本执行
+      // （上传文件扩展名已由服务端白名单校验，这里是纵深防御）
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
+    },
   });
 
   // 全局验证管道

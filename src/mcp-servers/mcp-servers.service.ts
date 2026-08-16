@@ -19,7 +19,8 @@ import { CreateMcpServerDto } from './dto/create-mcp-server.dto';
 import { UpdateMcpServerDto } from './dto/update-mcp-server.dto';
 import { QueryMcpServerDto } from './dto/query-mcp-server.dto';
 import { AGENT_ENCRYPTION_KEY } from '../agents/utils/encryption-key.provider';
-import { decrypt, encrypt } from '../agents/utils/crypto.util';
+import { decrypt, encrypt } from '../common/utils/crypto.util';
+import { assertPublicUrl } from '../common/utils/ssrf.util';
 
 type CurrentUser = Omit<User, 'password'>;
 
@@ -36,6 +37,8 @@ export class McpServersService {
   constructor(
     @InjectRepository(McpServer)
     private readonly mcpServerRepo: Repository<McpServer>,
+    @InjectRepository(User)
+    private readonly userRepo: Repository<User>,
     @Inject(AGENT_ENCRYPTION_KEY)
     private readonly encryptionKey: string,
   ) {}
@@ -44,30 +47,44 @@ export class McpServersService {
     this.assertStdioPermission(user, dto.type);
     await this.assertNameAvailable(dto.name);
 
-    const server = await this.mcpServerRepo.save(
-      this.mcpServerRepo.create({
-        name: dto.name,
-        type: dto.type,
-        description: dto.description ?? null,
-        createdBy: user.id,
-        isActive: true,
-        ...(dto.type === McpServerType.STDIO
-          ? {
-              command: dto.command!,
-              args: dto.args ?? null,
-              envEncrypted: dto.env ? this.encryptJson(dto.env) : null,
-              url: null,
-              headersEncrypted: null,
-            }
-          : {
-              command: null,
-              args: null,
-              envEncrypted: null,
-              url: dto.url!,
-              headersEncrypted: dto.headers ? this.encryptJson(dto.headers) : null,
-            }),
-      }),
-    );
+    // SSRF：sse / streamable-http 的 url 是服务端出站建连地址，落库前必须校验（stdio 无 url，跳过）
+    if (dto.type !== McpServerType.STDIO) {
+      await assertPublicUrl(dto.url!);
+    }
+
+    let server: McpServer;
+    try {
+      server = await this.mcpServerRepo.save(
+        this.mcpServerRepo.create({
+          name: dto.name,
+          type: dto.type,
+          description: dto.description ?? null,
+          createdBy: user.id,
+          isActive: true,
+          ...(dto.type === McpServerType.STDIO
+            ? {
+                command: dto.command!,
+                args: dto.args ?? null,
+                envEncrypted: dto.env ? this.encryptJson(dto.env) : null,
+                url: null,
+                headersEncrypted: null,
+              }
+            : {
+                command: null,
+                args: null,
+                envEncrypted: null,
+                url: dto.url!,
+                headersEncrypted: dto.headers ? this.encryptJson(dto.headers) : null,
+              }),
+        }),
+      );
+    } catch (e) {
+      // 先查重只是友好快速失败；并发下唯一索引才是最终防线（TOCTOU）
+      if (this.isDuplicateNameError(e)) {
+        throw new ConflictException(`MCP Server 名称 "${dto.name}" 已存在`);
+      }
+      throw e;
+    }
     return this.toView(server);
   }
 
@@ -96,6 +113,7 @@ export class McpServersService {
 
     if (dto.name !== undefined) server.name = dto.name;
     if (dto.description !== undefined) server.description = dto.description ?? null;
+    if (dto.isActive !== undefined) server.isActive = dto.isActive;
     server.type = nextType;
 
     // type 切换时重置另一形态的字段，避免出现 stdio+url 混合状态
@@ -122,7 +140,22 @@ export class McpServersService {
       throw new BadRequestException('sse / streamable-http 类型必须提供 url');
     }
 
-    const saved = await this.mcpServerRepo.save(server);
+    // SSRF：本次新传的 url（结果类型为非 stdio）保存前必须校验；
+    // 未传 url 时沿用旧值（旧值在 create/update 落库前已校验过）
+    if (nextType !== McpServerType.STDIO && dto.url !== undefined) {
+      await assertPublicUrl(dto.url);
+    }
+
+    let saved: McpServer;
+    try {
+      saved = await this.mcpServerRepo.save(server);
+    } catch (e) {
+      // 改名并发撞唯一索引时转 409（先查重只是快速失败，DB 唯一索引是最终防线）
+      if (this.isDuplicateNameError(e)) {
+        throw new ConflictException(`MCP Server 名称 "${server.name}" 已存在`);
+      }
+      throw e;
+    }
     return this.toView(saved);
   }
 
@@ -182,7 +215,10 @@ export class McpServersService {
   }
 
   /**
-   * Agent 关联前校验：全部存在且启用中；stdio 类型仅 admin 可关联。
+   * Agent/Skill 关联前校验：全部存在且启用中；stdio 类型仅 admin 可关联；
+   * 属主校验（跨用户凭据复用防护）：admin 可关联任意 server，普通用户只能关联
+   * 「自己创建」或「管理员创建（公共工具库）」的 server——普通用户 A 的私有
+   * server（env/headers 含其凭据）不允许被普通用户 B 关联复用。
    * 校验通过返回实体列表，供调用方直接写关联。
    */
   async validateForAssociation(ids: string[], user: CurrentUser): Promise<McpServer[]> {
@@ -199,6 +235,27 @@ export class McpServersService {
     }
     if (user.role !== UserRole.ADMIN && servers.some((s) => s.type === McpServerType.STDIO)) {
       throw new ForbiddenException('仅管理员可为 Agent 关联 stdio 类型的 MCP Server');
+    }
+    // 属主校验：admin 全放行；普通用户仅能关联自己的或管理员创建的 server
+    if (user.role !== UserRole.ADMIN) {
+      const foreignServers = servers.filter((s) => s.createdBy !== user.id);
+      if (foreignServers.length) {
+        const creatorIds = [...new Set(foreignServers.map((s) => s.createdBy))];
+        const adminCreatorIds = new Set(
+          (
+            await this.userRepo.find({
+              where: { id: In(creatorIds) },
+              select: ['id', 'role'],
+            })
+          )
+            .filter((u) => u.role === UserRole.ADMIN)
+            .map((u) => u.id),
+        );
+        const unauthorized = foreignServers.find((s) => !adminCreatorIds.has(s.createdBy));
+        if (unauthorized) {
+          throw new ForbiddenException(`无权使用该 MCP Server "${unauthorized.name}"`);
+        }
+      }
     }
     return servers;
   }
@@ -236,6 +293,16 @@ export class McpServersService {
     if (server.createdBy !== user.id && user.role !== UserRole.ADMIN) {
       throw new ForbiddenException('只有创建者或管理员可以操作该 MCP Server');
     }
+  }
+
+  /** MySQL 唯一索引冲突（name 唯一）识别：兼容 driverError 与直接 errno 两种形状 */
+  private isDuplicateNameError(e: unknown): boolean {
+    const err = e as { driverError?: { errno?: number; code?: string }; errno?: number };
+    return (
+      err?.driverError?.errno === 1062 ||
+      err?.driverError?.code === 'ER_DUP_ENTRY' ||
+      err?.errno === 1062
+    );
   }
 
   private encryptJson(value: Record<string, string>): string {

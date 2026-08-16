@@ -1,0 +1,35 @@
+NOTICE
+======
+
+This project contains code ported or adapted from infinite-canvas:
+
+    infinite-canvas
+    https://github.com/basketikun/infinite-canvas
+    Copyright (c) basketikun and contributors
+    Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
+
+Ported/adapted files carry a header comment of the form:
+
+    // Ported from infinite-canvas (https://github.com/basketikun/infinite-canvas), AGPL-3.0. See NOTICE.
+    // Adapted from infinite-canvas (https://github.com/basketikun/infinite-canvas), AGPL-3.0. See NOTICE.
+
+Scope in this repository (NestJS backend):
+
+- src/canvas/canvas.types.ts                       (ported, canvas document types)
+- src/canvas/lib/canvas-ops.ts                     (ported from canvas-agent-ops.ts)
+- src/canvas/lib/canvas-op-schemas.ts              (ported from canvas-agent schemas.ts)
+- src/canvas/lib/canvas-node-geometry.ts           (ported)
+- src/ai-generation/providers/image-generation.provider.ts   (adapted: browser -> NestJS proxy)
+- src/ai-generation/providers/image-size.util.ts             (ported)
+- src/ai-generation/providers/video-generation.provider.ts   (adapted)
+- src/ai-generation/providers/seedance-video.util.ts         (ported)
+- src/ai-generation/providers/audio-generation.provider.ts   (adapted)
+- src/ai-generation/entities/ai-channel.entity.ts            (adapted: config model shape)
+- src/agents/tools/canvas/canvas-operations.ts     (adapted from canvas-agent operations.ts)
+- src/agents/tools/canvas/canvas-tools.service.ts  (adapted: browser MCP tools -> backend tools)
+- src/prompts/lib/prompt-normalize.ts              (ported)
+- src/prompts/lib/prompt-presets.ts                (ported, builtin prompt source registry)
+- src/prompts/prompts.service.ts                   (adapted: fetch/normalize pipeline)
+
+The full AGPL-3.0 license text is available at:
+https://www.gnu.org/licenses/agpl-3.0.html

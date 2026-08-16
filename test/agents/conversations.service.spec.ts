@@ -1,10 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Not, Repository } from 'typeorm';
 import { GoneException, NotFoundException } from '@nestjs/common';
 import { ConversationsService } from 'src/agents/conversations.service';
-import { AgentConfig, ProviderType } from 'src/agents/entities/agent-config.entity';
-import { Conversation } from 'src/agents/entities/conversation.entity';
+import { AgentConfig } from 'src/agents/entities/agent-config.entity';
+import { Conversation, ConversationStatus } from 'src/agents/entities/conversation.entity';
 import { Message, MessageRole } from 'src/agents/entities/message.entity';
 import { AgentExecutorService } from 'src/agents/agent-executor.service';
 import { TypeORMCheckpointer } from 'src/agents/checkpointers/typeorm.checkpointer';
@@ -16,15 +16,18 @@ describe('ConversationsService', () => {
   let conversationRepo: jest.Mocked<Repository<Conversation>>;
   let messageRepo: jest.Mocked<Repository<Message>>;
   let executor: { run: jest.Mock; runStream: jest.Mock };
-  let checkpointer: { deleteThread: jest.Mock };
+  let checkpointer: {
+    deleteThread: jest.Mock;
+    captureBaseline: jest.Mock;
+    rollbackToBaseline: jest.Mock;
+  };
 
   const agent: AgentConfig = {
     id: 'agent-1',
     userId: 'user-1',
     name: '助手',
-    provider: ProviderType.ANTHROPIC,
-    model: 'claude-opus-4-8',
-    apiKeyEncrypted: 'encrypted',
+    channelId: 'ch-1',
+    modelName: 'claude-opus-4-8',
     isActive: true,
   } as AgentConfig;
 
@@ -37,7 +40,11 @@ describe('ConversationsService', () => {
 
   beforeEach(async () => {
     executor = { run: jest.fn(), runStream: jest.fn() };
-    checkpointer = { deleteThread: jest.fn() };
+    checkpointer = {
+      deleteThread: jest.fn(),
+      captureBaseline: jest.fn().mockResolvedValue({ cpMaxId: 0, wrMaxId: 0 }),
+      rollbackToBaseline: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -103,6 +110,29 @@ describe('ConversationsService', () => {
     });
   });
 
+  describe('listConversations', () => {
+    it('应该只返回未归档会话（status 排除 ARCHIVED），分页排序不变', async () => {
+      agentRepo.findOne.mockResolvedValue(agent);
+      conversationRepo.findAndCount.mockResolvedValue([[], 0]);
+
+      await service.listConversations('user-1', 'agent-1', { page: 2, limit: 10 });
+
+      expect(conversationRepo.findAndCount).toHaveBeenCalledWith({
+        where: { agentConfigId: 'agent-1', status: Not(ConversationStatus.ARCHIVED) },
+        order: { updatedAt: 'DESC' },
+        skip: 10,
+        take: 10,
+      });
+    });
+
+    it('他人的 Agent 应该抛 404', async () => {
+      agentRepo.findOne.mockResolvedValue(null);
+      await expect(service.listConversations('other', 'agent-1', {})).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
   describe('sendMessage', () => {
     it('应该先持久化用户消息，再执行 Agent，最后批量持久化 agent 消息', async () => {
       conversationRepo.findOne.mockResolvedValue({ ...conversation });
@@ -122,25 +152,32 @@ describe('ConversationsService', () => {
       expect(result.agentMessages).toHaveLength(1);
     });
 
-    it('首条消息应该自动截取前 30 字作为会话标题', async () => {
+    it('首条消息应该自动截取前 30 字作为会话标题，并刷新 updatedAt', async () => {
       conversationRepo.findOne.mockResolvedValue({ ...conversation, title: null });
       executor.run.mockResolvedValue([]);
       const longContent = '这是一条超过三十个字的用户消息，用来验证标题截取逻辑是否正常工作';
 
       await service.sendMessage('user-1', 'conv-1', longContent);
 
-      expect(conversationRepo.update).toHaveBeenCalledWith('conv-1', {
-        title: longContent.slice(0, 30),
-      });
+      expect(conversationRepo.update).toHaveBeenCalledWith(
+        'conv-1',
+        expect.objectContaining({
+          title: longContent.slice(0, 30),
+          updatedAt: expect.any(Date),
+        }),
+      );
     });
 
-    it('已有标题的会话不应该覆盖标题', async () => {
+    it('已有标题的会话不应该覆盖标题，但仍应刷新 updatedAt', async () => {
       conversationRepo.findOne.mockResolvedValue({ ...conversation, title: '旧标题' });
       executor.run.mockResolvedValue([]);
 
       await service.sendMessage('user-1', 'conv-1', '新消息');
 
-      expect(conversationRepo.update).not.toHaveBeenCalled();
+      expect(conversationRepo.update).toHaveBeenCalledTimes(1);
+      const updateArg = conversationRepo.update.mock.calls[0][1] as Partial<Conversation>;
+      expect(updateArg).not.toHaveProperty('title');
+      expect(updateArg.updatedAt).toBeInstanceOf(Date);
     });
 
     it('他人的会话应该抛 404', async () => {
@@ -228,7 +265,10 @@ describe('ConversationsService', () => {
         role: MessageRole.USER,
         content: '查股价',
       });
-      expect(conversationRepo.update).toHaveBeenCalledWith('conv-1', { title: '查股价' });
+      expect(conversationRepo.update).toHaveBeenCalledWith(
+        'conv-1',
+        expect.objectContaining({ title: '查股价', updatedAt: expect.any(Date) }),
+      );
 
       // 第二次 save：assistant(带 toolCalls) + tool + assistant = 3 条
       const savedMessages = messageRepo.save.mock.calls[1][0] as Partial<Message>[];
@@ -265,17 +305,21 @@ describe('ConversationsService', () => {
       });
     });
 
-    it('已有标题的会话不应该覆盖标题', async () => {
+    it('已有标题的会话不应该覆盖标题，但仍应刷新 updatedAt', async () => {
       executor.runStream.mockReturnValue((async function* () {})());
 
       for await (const _ of service.streamMessages({ ...conversation, title: '旧标题' }, '你好')) {
         // 消费空流
       }
 
-      expect(conversationRepo.update).not.toHaveBeenCalled();
+      expect(conversationRepo.update).toHaveBeenCalledTimes(1);
+      const updateArg = conversationRepo.update.mock.calls[0][1] as Partial<Conversation>;
+      expect(updateArg).not.toHaveProperty('title');
+      expect(updateArg.updatedAt).toBeInstanceOf(Date);
     });
 
-    it('流中途异常不应该落库任何消息（展示层零残留）', async () => {
+    it('流中途异常不应该落库任何消息，且应回滚本轮 checkpoint（失败零残留）', async () => {
+      checkpointer.captureBaseline.mockResolvedValue({ cpMaxId: 7, wrMaxId: 3 });
       executor.runStream.mockReturnValue(
         (async function* () {
           yield { type: 'text_delta', data: { text: '半截话' } } as SseEvent;
@@ -289,8 +333,42 @@ describe('ConversationsService', () => {
         }
       }).rejects.toThrow('LLM 连接中断');
 
+      expect(checkpointer.captureBaseline).toHaveBeenCalledWith('conv-1');
+      expect(checkpointer.rollbackToBaseline).toHaveBeenCalledWith('conv-1', {
+        cpMaxId: 7,
+        wrMaxId: 3,
+      });
       expect(messageRepo.save).not.toHaveBeenCalled();
       expect(conversationRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('流正常结束时不应回滚 checkpoint', async () => {
+      executor.runStream.mockReturnValue((async function* () {})());
+
+      for await (const _ of service.streamMessages(conversation, '你好')) {
+        // 消费空流
+      }
+
+      expect(checkpointer.captureBaseline).toHaveBeenCalledWith('conv-1');
+      expect(checkpointer.rollbackToBaseline).not.toHaveBeenCalled();
+    });
+
+    it('应该把调用方传入的 signal 透传给 executor.runStream', async () => {
+      executor.runStream.mockReturnValue((async function* () {})());
+      const abortController = new AbortController();
+
+      for await (const _ of service.streamMessages(conversation, '你好', {
+        signal: abortController.signal,
+      })) {
+        // 消费空流
+      }
+
+      expect(executor.runStream).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'agent-1' }),
+        'conv-1',
+        '你好',
+        { signal: abortController.signal },
+      );
     });
   });
 

@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { MoreThan, Repository } from 'typeorm';
 import { RunnableConfig } from '@langchain/core/runnables';
 import { Checkpoint, CheckpointMetadata, emptyCheckpoint } from '@langchain/langgraph-checkpoint';
 import { TypeORMCheckpointer } from 'src/agents/checkpointers/typeorm.checkpointer';
@@ -212,6 +212,35 @@ describe('TypeORMCheckpointer', () => {
 
       expect(checkpointRepo.delete).toHaveBeenCalledWith({ threadId });
       expect(writesRepo.delete).toHaveBeenCalledWith({ threadId });
+    });
+  });
+
+  describe('captureBaseline / rollbackToBaseline（失败零残留）', () => {
+    it('captureBaseline 应该返回两表当前最大自增 id（无数据时为 0）', async () => {
+      checkpointRepo.findOne.mockResolvedValueOnce({ id: 42 } as AgentCheckpoint);
+      writesRepo.findOne.mockResolvedValueOnce(null);
+
+      const baseline = await checkpointer.captureBaseline(threadId);
+
+      expect(baseline).toEqual({ cpMaxId: 42, wrMaxId: 0 });
+      expect(checkpointRepo.findOne).toHaveBeenCalledWith({
+        where: { threadId },
+        order: { id: 'DESC' },
+      });
+      expect(writesRepo.findOne).toHaveBeenCalledWith({
+        where: { threadId },
+        order: { id: 'DESC' },
+      });
+    });
+
+    it('rollbackToBaseline 应该按 id 水位删除基线之后的两表记录', async () => {
+      checkpointRepo.delete.mockResolvedValue({} as never);
+      writesRepo.delete.mockResolvedValue({} as never);
+
+      await checkpointer.rollbackToBaseline(threadId, { cpMaxId: 10, wrMaxId: 5 });
+
+      expect(checkpointRepo.delete).toHaveBeenCalledWith({ threadId, id: MoreThan(10) });
+      expect(writesRepo.delete).toHaveBeenCalledWith({ threadId, id: MoreThan(5) });
     });
   });
 });

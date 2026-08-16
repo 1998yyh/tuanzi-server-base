@@ -1,18 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
-import {
-  IsArray,
-  IsEnum,
-  IsInt,
-  IsNotEmpty,
-  IsOptional,
-  IsString,
-  IsUrl,
-  Length,
-  Max,
-  Min,
-} from 'class-validator';
+import { IsArray, IsInt, IsOptional, IsString, IsUUID, Length, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
-import { ProviderType } from '../entities/agent-config.entity';
 
 export class CreateAgentDto {
   @ApiProperty({ example: '客服助手', description: 'Agent 名称' })
@@ -26,35 +14,16 @@ export class CreateAgentDto {
   description?: string;
 
   @ApiProperty({
-    enum: ProviderType,
-    example: 'anthropic',
-    description: 'LLM 供应商',
+    example: '9b1d...-uuid',
+    description: '对话模型所属渠道（/ai-channels 中含 capability=chat 模型的渠道）',
   })
-  @IsEnum(ProviderType)
-  provider: ProviderType;
+  @IsUUID()
+  channelId: string;
 
-  @ApiProperty({ example: 'claude-opus-4-8', description: '模型名称' })
+  @ApiProperty({ example: 'claude-opus-4-8', description: '渠道下的对话模型名（capability=chat）' })
   @IsString()
-  @IsNotEmpty()
-  model: string;
-
-  @ApiProperty({
-    example: 'sk-ant-xxxx',
-    description: 'LLM API Key（加密存储，响应中永不回显明文）',
-  })
-  @IsString()
-  @IsNotEmpty()
-  apiKey: string;
-
-  @ApiProperty({
-    required: false,
-    example: 'https://gateway.example.com/v1',
-    description: '自定义 API 请求地址（中转网关/私有部署用），不传走 SDK 默认地址',
-  })
-  // require_tld: false 放行 localhost / 内网 IP 这类无顶级域的地址
-  @IsUrl({ require_tld: false, protocols: ['http', 'https'] })
-  @IsOptional()
-  baseUrl?: string | null;
+  @Length(1, 100)
+  modelName: string;
 
   @ApiProperty({ required: false, example: '你是一个专业客服...', description: '系统提示词' })
   @IsString()
@@ -72,7 +41,7 @@ export class CreateAgentDto {
   @Max(200000)
   @Type(() => Number)
   @IsOptional()
-  maxTokens?: number = 4096;
+  maxTokens?: number;
 
   @ApiProperty({
     required: false,
@@ -85,7 +54,7 @@ export class CreateAgentDto {
   @Max(50)
   @Type(() => Number)
   @IsOptional()
-  maxIterations?: number = 10;
+  maxIterations?: number;
 
   @ApiProperty({
     required: false,

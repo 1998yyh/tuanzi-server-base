@@ -1,4 +1,4 @@
-import { assertEncryptionKey, decrypt, encrypt, maskApiKey } from 'src/agents/utils/crypto.util';
+import { assertEncryptionKey, decrypt, encrypt, maskApiKey } from 'src/common/utils/crypto.util';
 
 // 64 位十六进制测试 key（32 字节）
 const TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';

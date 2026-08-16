@@ -1,8 +1,8 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { ProviderType } from '../entities/agent-config.entity';
+import { ApiFormat } from '../../ai-generation/entities/ai-channel.entity';
 
 /**
- * Agent 配置响应形状：API Key 只返回脱敏后 4 位，密文绝不出现在响应中。
+ * Agent 配置响应形状：渠道信息只返回名称/格式等展示字段，密文绝不出现在响应中。
  * 由 AgentsService.toResponse() 显式挑选字段构造。
  */
 export class AgentResponseDto {
@@ -15,21 +15,17 @@ export class AgentResponseDto {
   @ApiProperty({ example: '处理售前咨询', description: 'Agent 描述', nullable: true })
   description: string | null;
 
-  @ApiProperty({ enum: ProviderType, example: 'anthropic', description: 'LLM 供应商' })
-  provider: ProviderType;
+  @ApiProperty({ example: 'uuid', description: '对话模型所属渠道 ID' })
+  channelId: string;
 
-  @ApiProperty({ example: 'claude-opus-4-8', description: '模型名称' })
-  model: string;
+  @ApiProperty({ example: '公司网关', description: '渠道名称', nullable: true })
+  channelName: string | null;
 
-  @ApiProperty({ example: '****3xYz', description: '脱敏后的 API Key（仅后 4 位）' })
-  apiKeyMasked: string;
+  @ApiProperty({ enum: ApiFormat, example: 'openai', description: '渠道 API 格式', nullable: true })
+  apiFormat: ApiFormat | null;
 
-  @ApiProperty({
-    example: 'https://gateway.example.com/v1',
-    description: '自定义 API 请求地址，为空走 SDK 默认地址',
-    nullable: true,
-  })
-  baseUrl: string | null;
+  @ApiProperty({ example: 'claude-opus-4-8', description: '对话模型名' })
+  modelName: string;
 
   @ApiProperty({ example: '你是一个专业客服...', description: '系统提示词', nullable: true })
   systemPrompt: string | null;

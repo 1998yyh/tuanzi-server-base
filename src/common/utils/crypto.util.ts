@@ -35,7 +35,9 @@ export function encrypt(plaintext: string, keyHex: string): string {
 
 export function decrypt(stored: string, keyHex: string): string {
   const [ivHex, dataHex] = stored.split(':');
-  if (!ivHex || !dataHex) {
+  // 格式防御：IV 必须为 24 个 hex 字符（12 字节），data 必须为合法 hex 且至少含 16 字节 authTag，
+  // 否则 Buffer.from 得到空 Buffer，底层抛难懂的英文异常且无法区分密钥错误与数据损坏
+  if (!ivHex || !dataHex || !/^[0-9a-f]{24}$/i.test(ivHex) || !/^[0-9a-f]{32,}$/i.test(dataHex)) {
     throw new Error('密文格式非法，预期 hex(iv):hex(ciphertext+tag)');
   }
   const iv = Buffer.from(ivHex, 'hex');

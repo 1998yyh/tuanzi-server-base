@@ -3,7 +3,7 @@ import { StructuredToolInterface } from '@langchain/core/tools';
 import { SkillToolFactory, SkillExecutionDeps } from 'src/skills/skill-tool.factory';
 import { SkillsService } from 'src/skills/skills.service';
 import { Skill } from 'src/skills/skill.entity';
-import { AgentConfig, ProviderType } from 'src/agents/entities/agent-config.entity';
+import { AgentConfig } from 'src/agents/entities/agent-config.entity';
 import { MessageRole } from 'src/agents/entities/message.entity';
 
 describe('SkillToolFactory', () => {
@@ -14,7 +14,8 @@ describe('SkillToolFactory', () => {
   const agentConfig = {
     id: 'agent-1',
     name: '主 Agent',
-    provider: ProviderType.ANTHROPIC,
+    channelId: 'ch-1',
+    modelName: 'claude-opus-4-8',
   } as AgentConfig;
 
   const buildSkill = (override: Partial<Skill> = {}): Skill =>

@@ -1,6 +1,6 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { User } from '../users/users.entity';
 import { AgentConfig } from './entities/agent-config.entity';
 import { McpServersService } from '../mcp-servers/mcp-servers.service';
@@ -11,40 +11,47 @@ import { CreateAgentDto } from './dto/create-agent.dto';
 import { UpdateAgentDto } from './dto/update-agent.dto';
 import { QueryAgentsDto } from './dto/query-agents.dto';
 import { AgentResponseDto } from './dto/agent-response.dto';
-import { AGENT_ENCRYPTION_KEY } from './utils/encryption-key.provider';
-import { decrypt, encrypt, maskApiKey } from './utils/crypto.util';
+import { AiChannelsService } from '../ai-generation/ai-channels.service';
+import { AiChannel } from '../ai-generation/entities/ai-channel.entity';
 
 type CurrentUser = Omit<User, 'password'>;
 
 /**
- * Agent 配置业务逻辑：CRUD + API Key 加解密 + 多用户隔离。
+ * Agent 配置业务逻辑：CRUD + 渠道校验 + 多用户隔离。
  *
  * 安全约定：
  * - 所有查询按 userId 过滤，查不到统一抛 404（不区分「不存在」与「别人的」）
- * - API Key 写入前 AES-256-GCM 加密，响应只返回脱敏后 4 位
+ * - 对话模型配置收敛到 AI 渠道（channelId + modelName），创建/更新前经
+ *   AiChannelsService.resolveChatModel 校验渠道归属/启用/「对话」用途；
+ *   API Key 密文只存在于渠道侧，本服务不碰加解密
  */
 @Injectable()
 export class AgentsService {
   constructor(
     @InjectRepository(AgentConfig)
     private readonly agentRepo: Repository<AgentConfig>,
-    @Inject(AGENT_ENCRYPTION_KEY)
-    private readonly encryptionKey: string,
     private readonly mcpServersService: McpServersService,
     private readonly skillsService: SkillsService,
+    private readonly aiChannelsService: AiChannelsService,
   ) {}
 
   async create(user: CurrentUser, dto: CreateAgentDto): Promise<AgentResponseDto> {
-    const { apiKey, ...rest } = dto;
+    // 渠道归属/启用/「对话」用途校验（失败抛 400/403，由全局过滤器转响应）
+    await this.aiChannelsService.resolveChatModel(user.id, dto.channelId, dto.modelName);
     const agent = await this.agentRepo.save(
       this.agentRepo.create({
-        ...rest,
         userId: user.id,
-        apiKeyEncrypted: encrypt(apiKey, this.encryptionKey),
+        name: dto.name,
+        description: dto.description ?? null,
+        channelId: dto.channelId,
+        modelName: dto.modelName,
+        systemPrompt: dto.systemPrompt ?? null,
+        maxTokens: dto.maxTokens ?? 4096,
+        maxIterations: dto.maxIterations ?? 10,
         enabledTools: dto.enabledTools ?? [],
       }),
     );
-    return this.toResponse(agent);
+    return this.toResponse(agent, await this.aiChannelsService.getById(agent.channelId));
   }
 
   async findAll(userId: string, query: QueryAgentsDto) {
@@ -55,8 +62,10 @@ export class AgentsService {
       skip: (page - 1) * limit,
       take: limit,
     });
+    // N+1 修复：一次性批量查本页所有渠道（只取展示字段），不再逐条 getById
+    const channelMap = await this.loadChannelMap(items.map((a) => a.channelId));
     return {
-      items: items.map((a) => this.toResponse(a)),
+      items: items.map((a) => this.toResponse(a, channelMap.get(a.channelId) ?? null)),
       total,
       page,
       limit,
@@ -66,19 +75,36 @@ export class AgentsService {
 
   async findOne(userId: string, id: string): Promise<AgentResponseDto> {
     const agent = await this.findOwnedOrFail(userId, id);
-    return this.toResponse(agent);
+    return this.toResponse(agent, await this.aiChannelsService.getById(agent.channelId));
   }
 
   async update(user: CurrentUser, id: string, dto: UpdateAgentDto): Promise<AgentResponseDto> {
     const agent = await this.findOwnedOrFail(user.id, id);
 
-    const { apiKey, ...rest } = dto;
-    Object.assign(agent, rest);
-    if (apiKey) {
-      agent.apiKeyEncrypted = encrypt(apiKey, this.encryptionKey);
+    // channelId/modelName 传其一时，按「合并后」的组合校验
+    if (dto.channelId !== undefined || dto.modelName !== undefined) {
+      await this.aiChannelsService.resolveChatModel(
+        user.id,
+        dto.channelId ?? agent.channelId,
+        dto.modelName ?? agent.modelName,
+      );
     }
+
+    // 显式逐字段赋值，不用 Object.assign：class-transformer 实例化会带上
+    // maxTokens/maxIterations 默认值与 undefined 自有属性，直接 assign 会把
+    // 未传字段静默重置/丢键
+    if (dto.name !== undefined) agent.name = dto.name;
+    if (dto.description !== undefined) agent.description = dto.description;
+    if (dto.channelId !== undefined) agent.channelId = dto.channelId;
+    if (dto.modelName !== undefined) agent.modelName = dto.modelName;
+    if (dto.systemPrompt !== undefined) agent.systemPrompt = dto.systemPrompt;
+    if (dto.maxTokens !== undefined) agent.maxTokens = dto.maxTokens;
+    if (dto.maxIterations !== undefined) agent.maxIterations = dto.maxIterations;
+    if (dto.enabledTools !== undefined) agent.enabledTools = dto.enabledTools;
+    if (dto.isActive !== undefined) agent.isActive = dto.isActive;
+
     const saved = await this.agentRepo.save(agent);
-    return this.toResponse(saved);
+    return this.toResponse(saved, await this.aiChannelsService.getById(saved.channelId));
   }
 
   /** 软删除：is_active = false；重新激活通过 update 传 isActive=true */
@@ -130,17 +156,16 @@ export class AgentsService {
     return agent;
   }
 
-  /** 响应脱敏：显式挑选字段，密文与 userId 不出现在响应中 */
-  private toResponse(agent: AgentConfig): AgentResponseDto {
-    const plaintext = decrypt(agent.apiKeyEncrypted, this.encryptionKey);
+  /** 响应拼装（同步）：渠道信息由调用方传入，channelName/apiFormat 来自渠道轻量查询（不解密），密文绝不出现 */
+  private toResponse(agent: AgentConfig, channel: AiChannel | null): AgentResponseDto {
     return {
       id: agent.id,
       name: agent.name,
       description: agent.description,
-      provider: agent.provider,
-      model: agent.model,
-      apiKeyMasked: maskApiKey(plaintext),
-      baseUrl: agent.baseUrl ?? null,
+      channelId: agent.channelId,
+      channelName: channel?.name ?? null,
+      apiFormat: channel?.apiFormat ?? null,
+      modelName: agent.modelName,
       systemPrompt: agent.systemPrompt,
       maxTokens: agent.maxTokens,
       maxIterations: agent.maxIterations,
@@ -149,5 +174,15 @@ export class AgentsService {
       createdAt: agent.createdAt,
       updatedAt: agent.updatedAt,
     };
+  }
+
+  /** 批量查询渠道展示字段（id/name/apiFormat），避免逐条 getById 的 N+1 */
+  private async loadChannelMap(channelIds: string[]): Promise<Map<string, AiChannel>> {
+    const uniqueIds = [...new Set(channelIds.filter((id): id is string => !!id))];
+    if (!uniqueIds.length) return new Map();
+    const channels = await this.agentRepo.manager
+      .getRepository(AiChannel)
+      .find({ where: { id: In(uniqueIds) }, select: ['id', 'name', 'apiFormat'] });
+    return new Map(channels.map((c) => [c.id, c]));
   }
 }

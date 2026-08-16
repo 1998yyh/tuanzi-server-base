@@ -28,3 +28,6 @@ coverage/
 # 临时文件
 *.tmp
 .cache/
+
+# 运行时上传的媒体文件（封面图 / AI 生成结果，由 /uploads 静态服务）
+uploads/

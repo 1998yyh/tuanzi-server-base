@@ -155,3 +155,5 @@ src/
 ## License
 
 ISC
+
+本项目包含从 [infinite-canvas](https://github.com/basketikun/infinite-canvas)（AGPL-3.0）移植/改写的代码，相关文件头部有来源注释，详见根目录 [NOTICE](NOTICE)。

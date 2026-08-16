@@ -28,6 +28,8 @@ describe('ConversationsController', () => {
       write: jest.fn(),
       end: jest.fn(),
       json: jest.fn(),
+      on: jest.fn(),
+      removeListener: jest.fn(),
     };
     return res as unknown as Response & {
       status: jest.Mock;
@@ -35,6 +37,8 @@ describe('ConversationsController', () => {
       write: jest.Mock;
       end: jest.Mock;
       json: jest.Mock;
+      on: jest.Mock;
+      removeListener: jest.Mock;
     };
   };
 
@@ -130,6 +134,45 @@ describe('ConversationsController', () => {
 
       expect(res.write).toHaveBeenCalledTimes(2);
       expect(res.write).toHaveBeenLastCalledWith(expect.stringMatching(/^event: error\ndata: /));
+      expect(res.end).toHaveBeenCalled();
+    });
+
+    it('应该把 AbortSignal 传给 streamMessages，用于客户端断线时中止执行', async () => {
+      const res = createMockRes();
+      service.prepareStream.mockResolvedValue({ id: 'conv-1' } as Conversation);
+      service.streamMessages.mockReturnValue((async function* () {})());
+
+      await controller.sendMessage(mockUser, 'conv-1', { content: '你好' }, 'true', res);
+
+      expect(service.streamMessages).toHaveBeenCalledWith(
+        { id: 'conv-1' },
+        '你好',
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      // 注册了 close 监听，结束时移除
+      expect(res.on).toHaveBeenCalledWith('close', expect.any(Function));
+      expect(res.removeListener).toHaveBeenCalledWith('close', expect.any(Function));
+    });
+
+    it('客户端断开（close 触发 abort）后应停止写入 SSE 并正常收尾', async () => {
+      const res = createMockRes();
+      service.prepareStream.mockResolvedValue({ id: 'conv-1' } as Conversation);
+      service.streamMessages.mockReturnValue(
+        (async function* () {
+          yield { type: 'message_start', data: { role: 'assistant' } } as SseEvent;
+          // 模拟客户端断线：触发 close 回调 → AbortController.abort()
+          const onClose = res.on.mock.calls.find((c) => c[0] === 'close')?.[1] as
+            | (() => void)
+            | undefined;
+          onClose?.();
+          // abort 后循环应在写之前 break，这条事件不应被写出
+          yield { type: 'text_delta', data: { text: '不该写出来' } } as SseEvent;
+        })(),
+      );
+
+      await controller.sendMessage(mockUser, 'conv-1', { content: '你好' }, 'true', res);
+
+      expect(res.write).toHaveBeenCalledTimes(1);
       expect(res.end).toHaveBeenCalled();
     });
   });

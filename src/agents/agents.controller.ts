@@ -51,7 +51,10 @@ export class AgentsController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Agent 详情', description: 'API Key 只返回脱敏后 4 位' })
+  @ApiOperation({
+    summary: 'Agent 详情',
+    description: '渠道信息只返回展示字段，API Key 密文不出现在响应中',
+  })
   @ApiResponse({ status: 200, description: '获取成功', type: AgentResponseDto })
   @ApiResponse({ status: 404, description: 'Agent 不存在' })
   async findOne(
@@ -62,7 +65,10 @@ export class AgentsController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: '更新 Agent 配置', description: 'apiKey 不传则保持原值' })
+  @ApiOperation({
+    summary: '更新 Agent 配置',
+    description: '部分更新；channelId/modelName 传其一时按合并后组合校验',
+  })
   @ApiResponse({ status: 200, description: '更新成功', type: AgentResponseDto })
   @ApiResponse({ status: 404, description: 'Agent 不存在' })
   async update(

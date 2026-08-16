@@ -1,24 +1,24 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
 import { AgentsService } from 'src/agents/agents.service';
-import { AgentConfig, ProviderType } from 'src/agents/entities/agent-config.entity';
+import { AgentConfig } from 'src/agents/entities/agent-config.entity';
+import { UpdateAgentDto } from 'src/agents/dto/update-agent.dto';
 import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
 import { SkillsService } from 'src/skills/skills.service';
 import { McpServer, McpServerType } from 'src/mcp-servers/mcp-server.entity';
-import { AGENT_ENCRYPTION_KEY } from 'src/agents/utils/encryption-key.provider';
-import { decrypt, encrypt } from 'src/agents/utils/crypto.util';
+import { AiChannelsService } from 'src/ai-generation/ai-channels.service';
+import { ApiFormat } from 'src/ai-generation/entities/ai-channel.entity';
 import { UserRole } from 'src/users/users.entity';
-
-const TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-const API_KEY = 'sk-ant-api03-abcdefg123456';
 
 describe('AgentsService', () => {
   let service: AgentsService;
   let repo: jest.Mocked<Repository<AgentConfig>>;
   let mcpServersService: Record<string, jest.Mock>;
   let skillsService: Record<string, jest.Mock>;
+  let aiChannelsService: jest.Mocked<AiChannelsService>;
 
   const normalUser = {
     id: 'user-1',
@@ -35,12 +35,11 @@ describe('AgentsService', () => {
     user: normalUser as never,
     name: '客服助手',
     description: null,
-    provider: ProviderType.ANTHROPIC,
-    model: 'claude-opus-4-8',
-    apiKeyEncrypted: encrypt(API_KEY, TEST_KEY),
-    baseUrl: null,
+    channel: null as never,
+    channelId: 'ch-1',
+    modelName: 'claude-opus-4-8',
     systemPrompt: '你是客服',
-    maxTokens: 4096,
+    maxTokens: 8192,
     maxIterations: 10,
     enabledTools: ['web_search'],
     legacyMcpServers: null,
@@ -54,10 +53,8 @@ describe('AgentsService', () => {
 
   const createDto = {
     name: '客服助手',
-    provider: ProviderType.ANTHROPIC,
-    model: 'claude-opus-4-8',
-    apiKey: API_KEY,
-    systemPrompt: '你是客服',
+    channelId: 'ch-1',
+    modelName: 'claude-opus-4-8',
   };
 
   const sseServer: McpServer = {
@@ -98,28 +95,67 @@ describe('AgentsService', () => {
             save: jest.fn(async (v) => v),
             findOne: jest.fn(),
             findAndCount: jest.fn(),
+            // findAll 的 N+1 修复：批量查渠道走 agentRepo.manager.getRepository(AiChannel)
+            manager: {
+              getRepository: jest.fn(() => ({
+                find: jest.fn(async () => [
+                  { id: 'ch-1', name: '公司网关', apiFormat: ApiFormat.OPENAI },
+                ]),
+              })),
+            },
           },
         },
         { provide: McpServersService, useValue: mcpServersService },
         { provide: SkillsService, useValue: skillsService },
-        { provide: AGENT_ENCRYPTION_KEY, useValue: TEST_KEY },
+        {
+          provide: AiChannelsService,
+          useValue: {
+            resolveChatModel: jest.fn(async () => ({
+              channelId: 'ch-1',
+              apiFormat: ApiFormat.OPENAI,
+              baseUrl: 'https://api.openai.com',
+              apiKey: 'sk-x',
+              model: 'claude-opus-4-8',
+            })),
+            getById: jest.fn(async () => ({
+              id: 'ch-1',
+              name: '公司网关',
+              apiFormat: ApiFormat.OPENAI,
+            })),
+          },
+        },
       ],
     }).compile();
 
     service = module.get(AgentsService);
     repo = module.get(getRepositoryToken(AgentConfig));
+    aiChannelsService = module.get(AiChannelsService);
   });
 
   describe('create', () => {
-    it('API Key 应该加密存储，响应只返回脱敏后 4 位', async () => {
+    it('先校验渠道再落库，响应拼装渠道信息且无密文字段', async () => {
       const result = await service.create(normalUser, createDto);
 
-      const saved = repo.save.mock.calls[0][0] as AgentConfig;
-      expect(saved.apiKeyEncrypted).not.toContain(API_KEY);
-      expect(decrypt(saved.apiKeyEncrypted, TEST_KEY)).toBe(API_KEY);
-      expect(result.apiKeyMasked).toBe('****3456');
+      expect(aiChannelsService.resolveChatModel).toHaveBeenCalledWith(
+        'user-1',
+        'ch-1',
+        'claude-opus-4-8',
+      );
+      expect(result.channelName).toBe('公司网关');
+      expect(result.apiFormat).toBe(ApiFormat.OPENAI);
+      expect(result.modelName).toBe('claude-opus-4-8');
+      expect(result).not.toHaveProperty('apiKeyMasked');
       expect(result).not.toHaveProperty('apiKeyEncrypted');
       expect(result).not.toHaveProperty('userId');
+    });
+
+    it('渠道校验失败（如模型用途不是「对话」）时创建抛错', async () => {
+      aiChannelsService.resolveChatModel.mockRejectedValueOnce(
+        new BadRequestException('模型 "gpt-image-2" 的用途不是「对话」'),
+      );
+      await expect(
+        service.create(normalUser, { name: 'x', channelId: 'ch-1', modelName: 'gpt-image-2' }),
+      ).rejects.toThrow('的用途不是「对话」');
     });
 
     it('未传 enabledTools 时应该默认空数组', async () => {
@@ -144,7 +180,7 @@ describe('AgentsService', () => {
         expect.objectContaining({ where: { userId: 'user-1', isActive: true } }),
       );
       expect(result).toMatchObject({ total: 1, page: 1, limit: 10, totalPages: 1 });
-      expect(result.items[0].apiKeyMasked).toBe('****3456');
+      expect(result.items[0].channelName).toBe('公司网关');
     });
   });
 
@@ -159,16 +195,27 @@ describe('AgentsService', () => {
   });
 
   describe('update', () => {
-    it('传了 apiKey 才重新加密', async () => {
+    it('只在传了 channelId 或 modelName 时才重新校验渠道', async () => {
       repo.findOne.mockResolvedValue({ ...baseAgent });
 
-      await service.update(normalUser, 'agent-1', { name: '新名字' });
-      let saved = repo.save.mock.calls[0][0] as AgentConfig;
-      expect(saved.apiKeyEncrypted).toBe(baseAgent.apiKeyEncrypted);
+      await service.update(normalUser, 'agent-1', { name: '改名' });
+      expect(aiChannelsService.resolveChatModel).not.toHaveBeenCalled();
 
-      await service.update(normalUser, 'agent-1', { apiKey: 'sk-new-key-9999' });
-      saved = repo.save.mock.calls[1][0] as AgentConfig;
-      expect(decrypt(saved.apiKeyEncrypted, TEST_KEY)).toBe('sk-new-key-9999');
+      await service.update(normalUser, 'agent-1', { modelName: 'gpt-5' });
+      // 合并校验：channelId 用现值
+      expect(aiChannelsService.resolveChatModel).toHaveBeenCalledWith('user-1', 'ch-1', 'gpt-5');
+    });
+
+    it('部分更新不重置 maxTokens/maxIterations（模拟 class-transformer 实例化路径）', async () => {
+      // plainToInstance 会让 DTO 默认值成为自有属性——这是 HTTP 管线的真实形态
+      repo.findOne.mockResolvedValue({ ...baseAgent });
+      const dto = plainToInstance(UpdateAgentDto, { name: '改名' });
+      const saved = await service.update(normalUser, 'agent-1', dto);
+      // fixture 的 maxTokens 为非默认值 8192，断言保持原值；同时响应 JSON 不丢键
+      expect(saved.maxTokens).toBe(baseAgent.maxTokens);
+      expect(saved.maxIterations).toBe(baseAgent.maxIterations);
+      expect(saved).toHaveProperty('channelId');
+      expect(saved).toHaveProperty('modelName');
     });
   });
 

@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { BadRequestException } from '@nestjs/common';
 import { MemorySaver } from '@langchain/langgraph';
 import { AIMessage } from '@langchain/core/messages';
 import { StructuredToolInterface } from '@langchain/core/tools';
@@ -8,9 +9,10 @@ import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
 import { SkillToolFactory } from 'src/skills/skill-tool.factory';
 import { TypeORMCheckpointer } from 'src/agents/checkpointers/typeorm.checkpointer';
 import { AGENT_ENCRYPTION_KEY } from 'src/agents/utils/encryption-key.provider';
-import { encrypt } from 'src/agents/utils/crypto.util';
-import { AgentConfig, ProviderType } from 'src/agents/entities/agent-config.entity';
+import { AgentConfig } from 'src/agents/entities/agent-config.entity';
 import { MessageRole } from 'src/agents/entities/message.entity';
+import { AiChannelsService } from 'src/ai-generation/ai-channels.service';
+import { ApiFormat } from 'src/ai-generation/entities/ai-channel.entity';
 
 // 这个 mock 必须在 import 之前声明，jest.mock 会被提升到顶部
 const mockInvoke = jest.fn();
@@ -38,21 +40,20 @@ describe('AgentExecutorService', () => {
   let toolRegistry: { getToolsForAgent: jest.Mock };
   let mcpServersService: { findByAgentConfig: jest.Mock };
   let skillToolFactory: { createToolsForAgent: jest.Mock };
+  let aiChannelsService: jest.Mocked<AiChannelsService>;
 
-  const buildAgent = (override: Partial<AgentConfig> = {}): AgentConfig =>
+  const buildAgent = (overrides: Partial<AgentConfig> = {}): AgentConfig =>
     ({
       id: 'agent-1',
       userId: 'user-1',
-      name: '测试助手',
-      provider: ProviderType.ANTHROPIC,
-      model: 'claude-opus-4-8',
-      apiKeyEncrypted: encrypt(API_KEY, TEST_KEY),
-      systemPrompt: null,
+      name: '测试 Agent',
+      channelId: 'ch-1',
+      modelName: 'claude-opus-4-8',
       maxTokens: 4096,
       maxIterations: 10,
       enabledTools: [],
       isActive: true,
-      ...override,
+      ...overrides,
     }) as AgentConfig;
 
   const calculatorTool = {
@@ -79,10 +80,25 @@ describe('AgentExecutorService', () => {
           useValue: new MemorySaver() as unknown as TypeORMCheckpointer,
         },
         { provide: AGENT_ENCRYPTION_KEY, useValue: TEST_KEY },
+        {
+          provide: AiChannelsService,
+          useValue: {
+            resolveChatModel: jest.fn(
+              async (_userId: string, channelId: string, modelName: string) => ({
+                channelId,
+                apiFormat: ApiFormat.OPENAI,
+                baseUrl: 'https://api.openai.com',
+                apiKey: API_KEY,
+                model: modelName,
+              }),
+            ),
+          },
+        },
       ],
     }).compile();
 
     service = module.get(AgentExecutorService);
+    aiChannelsService = module.get(AiChannelsService);
   });
 
   describe('run（同步执行）', () => {
@@ -140,10 +156,13 @@ describe('AgentExecutorService', () => {
       const result = await service.run(buildAgent(), 'conv-1', '6乘7等于几');
 
       expect(mockInvoke).toHaveBeenCalledTimes(2);
-      // 第二参经 metadata 透传 tool_call_id，供 SSE 事件与历史归组配对
+      // 第二参经 metadata 透传 tool_call_id（SSE 事件配对），并携带中止 signal
       expect(calculatorTool.invoke).toHaveBeenCalledWith(
         { expression: '6*7' },
-        { metadata: { tool_call_id: 'call_1' } },
+        expect.objectContaining({
+          metadata: { tool_call_id: 'call_1' },
+          signal: expect.any(AbortSignal),
+        }),
       );
       expect(result).toHaveLength(3);
       expect(result[0]).toMatchObject({
@@ -200,11 +219,11 @@ describe('AgentExecutorService', () => {
       expect(result[2].content).toBe('抱歉，我没法查');
     });
 
-    it('工具抛异常时应该把错误信息作为工具结果返回给 LLM', async () => {
+    it('工具抛未知异常时应该脱敏为通用文案（内部细节不进消息表），完整错误进服务端日志', async () => {
       const failingTool = {
         name: 'calculator',
         invoke: jest.fn(async () => {
-          throw new Error('除零错误');
+          throw new Error('connect ECONNREFUSED 10.0.0.5:3389');
         }),
       } as unknown as StructuredToolInterface;
       toolRegistry.getToolsForAgent.mockResolvedValue([failingTool]);
@@ -216,11 +235,82 @@ describe('AgentExecutorService', () => {
           }),
         )
         .mockResolvedValueOnce(new AIMessage({ content: '计算失败了' }));
+      const loggerErrorSpy = jest
+        .spyOn(service['logger'], 'error')
+        .mockImplementation(() => undefined);
 
       const result = await service.run(buildAgent(), 'conv-1', '算一下');
 
-      expect(result[1].content).toContain('工具调用失败: 除零错误');
-      expect(result[2].content).toBe('计算失败了');
+      expect(result[1].content).toBe('工具执行失败，请稍后重试');
+      expect(result[1].content).not.toContain('ECONNREFUSED');
+      expect(loggerErrorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('工具执行异常: connect ECONNREFUSED'),
+        expect.stringContaining('Error'),
+      );
+      loggerErrorSpy.mockRestore();
+    });
+
+    it('工具抛 HttpException 时应保留中文业务文案喂给 LLM', async () => {
+      const failingTool = {
+        name: 'calculator',
+        invoke: jest.fn(async () => {
+          throw new BadRequestException('任务间隔不能少于 1 小时');
+        }),
+      } as unknown as StructuredToolInterface;
+      toolRegistry.getToolsForAgent.mockResolvedValue([failingTool]);
+      mockInvoke
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '',
+            tool_calls: [{ id: 'call_1', name: 'calculator', args: {} }],
+          }),
+        )
+        .mockResolvedValueOnce(new AIMessage({ content: '明白了' }));
+
+      const result = await service.run(buildAgent(), 'conv-1', '建个任务');
+
+      expect(result[1].content).toBe('任务间隔不能少于 1 小时');
+    });
+
+    it('工具超时后应中止底层执行（signal.aborted=true）并把超时文案喂给 LLM', async () => {
+      jest.useFakeTimers();
+      try {
+        let capturedSignal: AbortSignal | undefined;
+        const hangingTool = {
+          name: 'calculator',
+          invoke: jest.fn(async (_args: unknown, config: { signal?: AbortSignal }) => {
+            capturedSignal = config?.signal;
+            // 一直挂起直到被 abort
+            await new Promise<void>((resolve) => {
+              const poll = () => {
+                if (capturedSignal?.aborted) resolve();
+                else setTimeout(poll, 10);
+              };
+              poll();
+            });
+            return '最终完成';
+          }),
+        } as unknown as StructuredToolInterface;
+        toolRegistry.getToolsForAgent.mockResolvedValue([hangingTool]);
+        mockInvoke
+          .mockResolvedValueOnce(
+            new AIMessage({
+              content: '',
+              tool_calls: [{ id: 'call_1', name: 'calculator', args: {} }],
+            }),
+          )
+          .mockResolvedValueOnce(new AIMessage({ content: '超时了，稍后再说' }));
+
+        const runPromise = service.run(buildAgent(), 'conv-1', '算一下');
+        await jest.advanceTimersByTimeAsync(30_000);
+        const result = await runPromise;
+
+        expect(capturedSignal?.aborted).toBe(true);
+        expect(result[1].content).toBe('工具调用超时（30s）');
+        expect(result[2].content).toBe('超时了，稍后再说');
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('第二轮对话不应该把历史消息重复计入返回', async () => {
@@ -372,64 +462,62 @@ describe('AgentExecutorService', () => {
     });
   });
 
-  describe('createModelFromConfig', () => {
-    it('openai provider 应该创建 ChatOpenAI 并传入解密后的 key', async () => {
-      const { ChatOpenAI } = jest.requireMock('@langchain/openai') as {
-        ChatOpenAI: jest.Mock;
-      };
+  describe('createModelFromConfig（按渠道解析）', () => {
+    it('用 agent 的 userId/channelId/modelName 调 resolveChatModel', async () => {
       mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
 
-      await service.run(
-        buildAgent({ provider: ProviderType.OPENAI, model: 'gpt-4o' }),
-        'conv-1',
-        '你好',
-      );
+      await service.run(buildAgent({ channelId: 'ch-9', modelName: 'gpt-5' }), 'thread-1', 'hi');
+
+      expect(aiChannelsService.resolveChatModel).toHaveBeenCalledWith('user-1', 'ch-9', 'gpt-5');
+    });
+
+    it('openai 格式渠道创建 ChatOpenAI 并传 baseURL', async () => {
+      const { ChatOpenAI } = jest.requireMock('@langchain/openai') as { ChatOpenAI: jest.Mock };
+      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
+
+      await service.run(buildAgent({ modelName: 'gpt-5' }), 'thread-1', 'hi');
 
       expect(ChatOpenAI).toHaveBeenCalledWith({
         apiKey: API_KEY,
-        model: 'gpt-4o',
+        model: 'gpt-5',
         maxTokens: 4096,
+        configuration: { baseURL: 'https://api.openai.com' },
       });
     });
 
-    it('openai provider 配置 baseUrl 时应该覆盖默认请求地址', async () => {
-      const { ChatOpenAI } = jest.requireMock('@langchain/openai') as {
-        ChatOpenAI: jest.Mock;
-      };
-      mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
-
-      await service.run(
-        buildAgent({
-          provider: ProviderType.OPENAI,
-          model: 'deepseek-v4-flash',
-          baseUrl: 'https://api.deepseek.com',
-        }),
-        'conv-1',
-        '你好',
-      );
-
-      expect(ChatOpenAI).toHaveBeenCalledWith({
+    it('anthropic 格式渠道创建 ChatAnthropic 并传 anthropicApiUrl', async () => {
+      aiChannelsService.resolveChatModel.mockResolvedValueOnce({
+        channelId: 'ch-1',
+        apiFormat: ApiFormat.ANTHROPIC,
+        baseUrl: 'https://api.anthropic.com',
         apiKey: API_KEY,
-        model: 'deepseek-v4-flash',
-        maxTokens: 4096,
-        configuration: { baseURL: 'https://api.deepseek.com' },
+        model: 'claude-opus-4-8',
       });
-    });
-
-    it('anthropic provider 配置 baseUrl 时应该传 anthropicApiUrl', async () => {
       const { ChatAnthropic } = jest.requireMock('@langchain/anthropic') as {
         ChatAnthropic: jest.Mock;
       };
       mockInvoke.mockResolvedValue(new AIMessage({ content: 'ok' }));
 
-      await service.run(buildAgent({ baseUrl: 'https://gateway.example.com' }), 'conv-1', '你好');
+      await service.run(buildAgent(), 'thread-1', 'hi');
 
       expect(ChatAnthropic).toHaveBeenCalledWith({
         apiKey: API_KEY,
         model: 'claude-opus-4-8',
         maxTokens: 4096,
-        anthropicApiUrl: 'https://gateway.example.com',
+        anthropicApiUrl: 'https://api.anthropic.com',
       });
+    });
+
+    it('gemini 等不支持的格式抛 BadRequestException', async () => {
+      aiChannelsService.resolveChatModel.mockResolvedValueOnce({
+        channelId: 'ch-1',
+        apiFormat: ApiFormat.GEMINI,
+        baseUrl: 'https://generativelanguage.googleapis.com',
+        apiKey: API_KEY,
+        model: 'gemini-2.5-pro',
+      });
+
+      await expect(service.run(buildAgent(), 'thread-1', 'hi')).rejects.toThrow('不支持对话');
     });
   });
 });

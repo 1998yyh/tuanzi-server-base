@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 身份定义
 
 - **角色**: NestJS 后端工程师
-- **技术栈**: TypeScript 5.8 + NestJS 11 + TypeORM 0.3 + MySQL 8.0 + passport-jwt + pnpm 10
+- **技术栈**: TypeScript 5.8 + NestJS 11 + TypeORM 0.3 + MySQL 8.0 + passport-jwt + LangChain/LangGraph + zod + pnpm 10
 - **项目描述**: 团子后台基础服务——用户认证 + 日报（AI情报/汪汪队）内容管理 + Agent 平台 API
 
 ## 项目结构
@@ -16,13 +16,44 @@ src/
   users/          # User 实体（含 role 字段）+ UsersService（无 controller，不暴露路由）
   daily-reports/  # 日报 CRUD，公开只读接口，无需鉴权
   agents/         # Agent 平台：配置 CRUD + 多轮会话 + LangGraph tool loop + MCP 工具 + SSE 流式
+                  #   + tools/canvas/ 画布 Agent 工具 16 个（CanvasToolsService）
+  mcp-servers/    # 全局 MCP Server 工具库 CRUD：Admin 集中配置，普通用户选配给 Agent；
+                  #   env/headers AES-256-GCM 加密落库，绝不明文出现在 API 响应
+  skills/         # 技能管理 CRUD + skill-tool.factory：Skill → DynamicStructuredTool，
+                  #   主 Agent 像调普通工具一样调 Skill（zod 校验输入，内部走子 Agent）
+  stock-signals/  # A股多空信号扫描：新浪 upbs 接口抓取（并发 12/超时 10s），
+                  #   POST 扫描建异步任务轮询回填，GET 结果/历史日期公开只读
+  media/          # 媒体文件：上传/落盘（saveBuffer 是生成结果主写入路径）+ /uploads/media 静态
+  ai-generation/  # AI 渠道（key AES-256-GCM 加密）+ 图/视/音生成 + providers/ + cron 视频轮询
+  canvas/         # 无限画布：canvas_projects（document JSON + version 乐观锁）+ CanvasOpsService 单一写路径
+  prompts/        # 提示词库：prompt_sources 源管理（内容不入库，抓取 + 内存缓存 1h SWR）
+  assets/         # 素材库：text/image/video 素材（媒体挂 media_id FK）
   uploads/        # ⚠️ 孤儿模块：MulterModule 磁盘存储配置，未在 app.module 注册
   common/         # guards/ decorators/ filters/（跨模块共享件）
 ```
 
-- 功能模块在 `src/app.module.ts` 注册，当前仅：`AuthModule`、`UsersModule`、`DailyReportsModule`、`AgentsModule`。新增模块必须手动加进 `imports`。
-- `uploads/` 目录（仓库根）存封面图，`main.ts` 静态服务在 `/uploads/` 前缀。文件上传端点随 novels 模块一起被删除；如需恢复上传，把 `UploadsModule` import 进使用方模块并配 `FileInterceptor`。
+- 功能模块在 `src/app.module.ts` 注册，当前：`AuthModule`、`UsersModule`、`DailyReportsModule`、`AgentsModule`、`McpServersModule`、`SkillsModule`、`StockSignalsModule`、`MediaModule`、`AiGenerationModule`、`CanvasModule`、`PromptsModule`、`AssetsModule`。新增模块必须手动加进 `imports`。
+- **画布平台**（2026-08 从 infinite-canvas 迁移，AGPL-3.0，见根目录 NOTICE 与 `docs/plans/2026-08-07-canvas-platform-design.md`）：画布文档 = `canvas_projects.document` JSON 列 + version 乐观锁，所有写路径走 `CanvasDocumentService.applyMutation`；视频生成任务化（POST 立即返回 taskId，cron 10s 轮询回填）；模块依赖方向 CanvasModule ← AiGenerationModule ← AgentsModule（无环）。**自定义调用脚本 v1 不支持**（服务端 `new Function` = RCE 风险，决策见设计文档 §1）。
+- `uploads/` 目录（仓库根）存封面图，`main.ts` 静态服务在 `/uploads/` 前缀（注意在 `/api` 前缀之外，前端拼 URL 要补 origin）。
 - `agents/` 要点：**ChatModel 按 Agent 的数据库配置动态创建**（provider/model/apiKey 均落库，原 `src/llm/` 全局 env 配置模块已删除）；会话状态用 TypeORMCheckpointer（thread_id = conversationId）持久化；API Key AES-256-GCM 加密存储（密钥为必填环境变量 `AGENT_ENCRYPTION_KEY`，64 位 hex）；stdio 类型 MCP 仅 `role=admin` 用户可配置（首个管理员需手工 SQL 提权）；同一会话必须串行发消息（前端契约，后端未做行锁）。
+- `agents/` 执行引擎不变式（2026-08 DSH 交互移植，踩坑实录）：① **`iterations: 0` 必须随每次图运行重置**（run/runStream/runSubAgent/runBatch 四个入口）——checkpoint 恢复会带上历史累计值，累计 ≥ maxIterations 后条件边永久跳过 tools_node，留下无 tool 回应的 tool_calls 毒化后续每一轮；② **子代理事件隔离**：LangChain callback 传播会让子图 streamEvents 全部冒泡到外层 streamEvents，且两边节点同名（agent_node/tools_node）——子运行必须带 `metadata.subAgentRun=true`（可继承标记），外层 pump 丢弃带标事件，子轨迹只经 subHook 旁路以 `sub_event { callId, ... }` 注入合并队列；③ **同会话执行锁** `ConversationExecutionLock`（内存 FIFO）：streamMessages 与后台任务 runner 共用，后台任务走 runBatch({threadId}) 才不会踩坏 checkpoint 基线；④ 工具失败透出走 per-run `erroredToolCalls` Set → SSE `tool_result.isError` + 持久化 `messages.is_error`。
+  - 生产库手动 DDL（synchronize=false）：
+    ```sql
+    ALTER TABLE messages ADD COLUMN is_error tinyint(1) NOT NULL DEFAULT 0;
+    CREATE TABLE background_tasks (
+      id char(36) NOT NULL PRIMARY KEY,
+      conversation_id char(36) NOT NULL,
+      agent_config_id char(36) NOT NULL,
+      status enum('pending','running','done','failed') NOT NULL DEFAULT 'pending',
+      input text NOT NULL,
+      result_message_id char(36) NULL,
+      created_at datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+      updated_at datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+      finished_at datetime(6) NULL,
+      KEY idx_bg_conv_status (conversation_id, status),
+      CONSTRAINT fk_bg_conv FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ```
 
 ## 可执行命令
 
@@ -56,7 +87,7 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 - 过期时间走环境变量 `JWT_EXPIRES_IN` / `JWT_REFRESH_EXPIRES_IN`（单位：秒，默认 7200 / 604800）。注意：env 读出来是字符串，代码里必须 `Number()` 转换，否则 jsonwebtoken 会把 `"7200"` 当成 7200 毫秒。
 - `JWT_SECRET` 为必填——`auth.module.ts` 与 `jwt.strategy.ts` 在缺失时会直接抛错（fail fast），不再有默认值兜底。
 - `JwtStrategy.validate` 返回**剔除密码的完整 user 实体**（查库确认用户存在后一次返回），controller 用 `@CurrentUser()` 直接获取，不要二次查库。
-- `synchronize: NODE_ENV !== 'production'`：开发环境改实体即自动改表，**不要写 migration**；生产环境绝不能开。
+- `synchronize: false`（2026-08 起全环境关闭）：改实体后**手写 DDL 放 `docs/plans/YYYY-MM-DD-*.sql`**，手动在 Adminer（:8080）执行，不写 migration。
 - 实体通过 `**/*.entity{.ts,.js}` glob 自动发现，新实体放哪都会被加载。
 - 日报模块：只读接口（GET）公开，写接口（POST/PATCH/DELETE）必须 `@UseGuards(JwtAuthGuard)`。
 - Swagger 仅非生产环境注册；CORS 仅在配置 `CORS_ORIGINS` 时开启 credentials（`origin: '*'` 与 credentials 互斥）。
@@ -79,7 +110,7 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 ### ✅ 必须执行
 
 - 所有请求字段走 DTO + class-validator——全局 `ValidationPipe` 开了 `forbidNonWhitelisted`，DTO 未声明的字段会直接 400。
-- 新增实体字段后重启 dev server 让 synchronize 生效，然后用 Adminer（:8080）确认表结构。
+- 新增实体字段后：手写 DDL 到 `docs/plans/` 并在 Adminer（:8080）执行（synchronize 已全环境关闭）。
 - 新模块/实体/服务写完跑 `pnpm lint` 和 `pnpm test`。
 
 ### ⚠️ 需先询问
@@ -97,7 +128,7 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 
 ## 测试要求
 
-- Jest 29，测试统一放 `test/` 目录、镜像 `src/` 模块结构（如 `test/auth/auth.service.spec.ts`），`roots` 限定为 `test/`；被测代码一律用 `src/` 别名导入（已在 `jest.config.js` 的 `moduleNameMapper` 映射），不写相对路径。
+- Jest 30（ts-jest 29），测试统一放 `test/` 目录、镜像 `src/` 模块结构（如 `test/auth/auth.service.spec.ts`），`roots` 限定为 `test/`；被测代码一律用 `src/` 别名导入（已在 `jest.config.js` 的 `moduleNameMapper` 映射），不写相对路径。
 - 单元测试 mock 所有外部依赖（Service 的 Repository、被注入的其他 Service），不连真实数据库；目前无 e2e 测试。
 - 覆盖率收集排除 `*.module.ts` / `*.dto.ts` / `*.entity.ts` / `main.ts`——业务逻辑应放在 Service 层才可被覆盖率度量。
 
@@ -107,6 +138,6 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 - 新增功能模块时同步更新本文件「项目结构」与 `app.module.ts` 注册清单。
 
 ---
-**版本**: v2.2
-**最后更新**: 2026-07-24
+**版本**: v2.4
+**最后更新**: 2026-08-08
 **维护者**: 团子项目组

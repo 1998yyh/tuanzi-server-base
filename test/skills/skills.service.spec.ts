@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { QueryFailedError, Repository } from 'typeorm';
 import {
   BadRequestException,
   ConflictException,
@@ -10,7 +10,7 @@ import {
 import { SkillsService } from 'src/skills/skills.service';
 import { Skill } from 'src/skills/skill.entity';
 import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
-import { UserRole } from 'src/users/users.entity';
+import { User, UserRole } from 'src/users/users.entity';
 
 describe('SkillsService', () => {
   let service: SkillsService;
@@ -67,6 +67,10 @@ describe('SkillsService', () => {
           },
         },
         { provide: McpServersService, useValue: mcpServersService },
+        {
+          provide: getRepositoryToken(User),
+          useValue: { findOne: jest.fn() },
+        },
       ],
     }).compile();
 
@@ -95,6 +99,19 @@ describe('SkillsService', () => {
       await expect(service.create(normalUser, createDto)).rejects.toThrow(ConflictException);
     });
 
+    it('落库撞唯一索引（errno 1062）应转 409（TOCTOU 兜底）', async () => {
+      repo.findOne.mockResolvedValue(null); // 先查重通过
+      repo.save.mockRejectedValueOnce(
+        new QueryFailedError(
+          'INSERT INTO skills ...',
+          [],
+          Object.assign(new Error('Duplicate entry'), { errno: 1062, code: 'ER_DUP_ENTRY' }),
+        ),
+      );
+
+      await expect(service.create(normalUser, createDto)).rejects.toThrow(ConflictException);
+    });
+
     it('enabledTools 含未注册工具名应抛 400', async () => {
       repo.findOne.mockResolvedValue(null);
 
@@ -118,16 +135,36 @@ describe('SkillsService', () => {
   });
 
   describe('findAllActive', () => {
-    it('应只查启用中的 Skill 并返回视图', async () => {
+    it('应只查启用中的 Skill，并单独回查 server id 组装视图（不加载完整 mcpServers）', async () => {
       repo.findAndCount.mockResolvedValue([[{ ...baseSkill }], 1]);
+      repo.find.mockResolvedValue([
+        { ...baseSkill, mcpServers: [{ id: 'srv-1' }, { id: 'srv-2' }] as never },
+      ]);
 
       const result = await service.findAllActive();
 
       expect(repo.findAndCount).toHaveBeenCalledWith(
         expect.objectContaining({ where: { isActive: true } }),
       );
+      // 列表查询不再带 relations，避免把 env/headers 密文列一起捞出来
+      expect(repo.findAndCount).toHaveBeenCalledWith(
+        expect.not.objectContaining({ relations: expect.anything() }),
+      );
+      expect(repo.find).toHaveBeenCalledWith(
+        expect.objectContaining({ select: expect.objectContaining({ mcpServers: { id: true } }) }),
+      );
       expect(result.total).toBe(1);
       expect(result.items[0].name).toBe('generate_ai_report');
+      expect(result.items[0].mcpServerIds).toEqual(['srv-1', 'srv-2']);
+    });
+
+    it('列表为空时不回查关联，直接返回空结果', async () => {
+      repo.findAndCount.mockResolvedValue([[], 0]);
+
+      const result = await service.findAllActive();
+
+      expect(result).toEqual({ items: [], total: 0 });
+      expect(repo.find).not.toHaveBeenCalled();
     });
   });
 
@@ -144,6 +181,23 @@ describe('SkillsService', () => {
       repo.findOne
         .mockResolvedValueOnce({ ...baseSkill })
         .mockResolvedValueOnce({ ...baseSkill, id: 'skill-2' });
+
+      await expect(service.update(normalUser, 'skill-1', { name: 'taken' })).rejects.toThrow(
+        ConflictException,
+      );
+    });
+
+    it('改名落库撞唯一索引（errno 1062）应转 409（TOCTOU 兜底）', async () => {
+      repo.findOne
+        .mockResolvedValueOnce({ ...baseSkill }) // findOrFail
+        .mockResolvedValueOnce(null); // 名称查重通过
+      repo.save.mockRejectedValueOnce(
+        new QueryFailedError(
+          'UPDATE skills ...',
+          [],
+          Object.assign(new Error('Duplicate entry'), { errno: 1062, code: 'ER_DUP_ENTRY' }),
+        ),
+      );
 
       await expect(service.update(normalUser, 'skill-1', { name: 'taken' })).rejects.toThrow(
         ConflictException,

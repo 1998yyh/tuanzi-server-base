@@ -19,6 +19,16 @@ import { SkillsModule } from '../skills/skills.module';
 import { DailyReportsModule } from '../daily-reports/daily-reports.module';
 import { ScheduledTask } from './scheduled-tasks/scheduled-task.entity';
 import { ScheduledTasksService } from './scheduled-tasks/scheduled-tasks.service';
+import { BackgroundTask } from './background-tasks/background-task.entity';
+import { BackgroundTasksService } from './background-tasks/background-tasks.service';
+import { BackgroundTasksController } from './background-tasks/background-tasks.controller';
+import { ConversationExecutionLock } from './utils/conversation-execution-lock';
+import { DelegateToolFactory } from './tools/delegate-tool.factory';
+import { CanvasToolsService } from './tools/canvas/canvas-tools.service';
+import { CanvasModule } from '../canvas/canvas.module';
+import { AiGenerationModule } from '../ai-generation/ai-generation.module';
+import { PromptsModule } from '../prompts/prompts.module';
+import { AssetsModule } from '../assets/assets.module';
 
 @Module({
   imports: [
@@ -30,12 +40,18 @@ import { ScheduledTasksService } from './scheduled-tasks/scheduled-tasks.service
       AgentCheckpoint,
       AgentCheckpointWrite,
       ScheduledTask,
+      BackgroundTask,
     ]),
     McpServersModule,
     SkillsModule,
     DailyReportsModule,
+    // 画布工具依赖：canvas/ai-generation/prompts/assets（依赖方向 agents → 各模块，无环）
+    CanvasModule,
+    AiGenerationModule,
+    PromptsModule,
+    AssetsModule,
   ],
-  controllers: [AgentsController, ConversationsController],
+  controllers: [AgentsController, ConversationsController, BackgroundTasksController],
   providers: [
     AgentsService,
     ConversationsService,
@@ -43,6 +59,10 @@ import { ScheduledTasksService } from './scheduled-tasks/scheduled-tasks.service
     ToolRegistryService,
     TypeORMCheckpointer,
     ScheduledTasksService,
+    BackgroundTasksService,
+    ConversationExecutionLock,
+    DelegateToolFactory,
+    CanvasToolsService,
     encryptionKeyProvider,
   ],
 })

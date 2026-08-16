@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { QueryFailedError, Repository } from 'typeorm';
 import { DailyReport, DailyReportType } from './daily-reports.entity';
 import {
   CreateDailyReportDto,
@@ -15,6 +15,25 @@ export class DailyReportsService {
     private dailyReportRepository: Repository<DailyReport>,
   ) {}
 
+  /**
+   * save 撞唯一索引（type+date）时转 409。
+   * check-then-insert 的查重只是快速失败路径，并发竞态下的最终防线是 DB 唯一索引。
+   */
+  private async saveWithDupGuard<T>(promise: Promise<T>, date: string): Promise<T> {
+    try {
+      return await promise;
+    } catch (error) {
+      if (
+        error instanceof QueryFailedError &&
+        ((error.driverError as { errno?: number } | undefined)?.errno === 1062 ||
+          (error.driverError as { code?: string } | undefined)?.code === 'ER_DUP_ENTRY')
+      ) {
+        throw new ConflictException(`${date} 该类型的日报已存在`);
+      }
+      throw error;
+    }
+  }
+
   async create(createDto: CreateDailyReportDto): Promise<DailyReport> {
     // type + date 有唯一索引，先查重以返回明确的 409 而非数据库 500
     const existing = await this.findByTypeAndDate(createDto.type, createDto.date);
@@ -23,7 +42,8 @@ export class DailyReportsService {
     }
 
     const report = this.dailyReportRepository.create(createDto);
-    return this.dailyReportRepository.save(report);
+    // 并发竞态兜底：DB 唯一索引冲突转 409（上方查重只是快速失败路径）
+    return this.saveWithDupGuard(this.dailyReportRepository.save(report), createDto.date);
   }
 
   async findAll(query: QueryDailyReportDto) {
@@ -72,7 +92,8 @@ export class DailyReportsService {
   async update(id: string, updateDto: UpdateDailyReportDto): Promise<DailyReport> {
     const report = await this.findOne(id);
     Object.assign(report, updateDto);
-    return this.dailyReportRepository.save(report);
+    // update 可能改 type/date 撞到其他行的唯一索引，同样转 409
+    return this.saveWithDupGuard(this.dailyReportRepository.save(report), report.date);
   }
 
   /** 同 type+date 已存在则覆盖 title/content，否则新建（AI 自动生成日报场景） */
@@ -81,9 +102,12 @@ export class DailyReportsService {
     if (existing) {
       existing.title = dto.title;
       existing.content = dto.content;
-      return this.dailyReportRepository.save(existing);
+      return this.saveWithDupGuard(this.dailyReportRepository.save(existing), dto.date);
     }
-    return this.dailyReportRepository.save(this.dailyReportRepository.create(dto));
+    return this.saveWithDupGuard(
+      this.dailyReportRepository.save(this.dailyReportRepository.create(dto)),
+      dto.date,
+    );
   }
 
   async remove(id: string): Promise<void> {

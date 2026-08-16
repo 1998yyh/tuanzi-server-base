@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { QueryFailedError, Repository } from 'typeorm';
 import {
   BadRequestException,
   ConflictException,
@@ -10,14 +10,15 @@ import {
 import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
 import { McpServer, McpServerType } from 'src/mcp-servers/mcp-server.entity';
 import { AGENT_ENCRYPTION_KEY } from 'src/agents/utils/encryption-key.provider';
-import { decrypt } from 'src/agents/utils/crypto.util';
-import { UserRole } from 'src/users/users.entity';
+import { decrypt } from 'src/common/utils/crypto.util';
+import { User, UserRole } from 'src/users/users.entity';
 
 const TEST_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
 describe('McpServersService', () => {
   let service: McpServersService;
   let repo: jest.Mocked<Repository<McpServer>>;
+  let userRepo: jest.Mocked<Repository<User>>;
 
   const normalUser = {
     id: 'user-1',
@@ -29,6 +30,9 @@ describe('McpServersService', () => {
   };
   const adminUser = { ...normalUser, id: 'admin-1', role: UserRole.ADMIN };
 
+  // 使用公网字面 IP（不触发真实 DNS 解析，测试稳定；也避开 SSRF 黑名单）
+  const PUBLIC_IP_URL = 'http://1.2.3.4:8080/sse';
+
   const sseServer: McpServer = {
     id: 'srv-1',
     name: 'web-search',
@@ -36,7 +40,7 @@ describe('McpServersService', () => {
     command: null,
     args: null,
     envEncrypted: null,
-    url: 'https://mcp.example.com/sse',
+    url: PUBLIC_IP_URL,
     headersEncrypted: null,
     description: '联网搜索',
     isActive: true,
@@ -62,12 +66,17 @@ describe('McpServersService', () => {
             createQueryBuilder: jest.fn(),
           },
         },
+        {
+          provide: getRepositoryToken(User),
+          useValue: { find: jest.fn() },
+        },
         { provide: AGENT_ENCRYPTION_KEY, useValue: TEST_KEY },
       ],
     }).compile();
 
     service = module.get(McpServersService);
     repo = module.get(getRepositoryToken(McpServer));
+    userRepo = module.get(getRepositoryToken(User));
     jest.clearAllMocks();
   });
 
@@ -78,7 +87,7 @@ describe('McpServersService', () => {
       const result = await service.create(normalUser, {
         name: 'web-search',
         type: McpServerType.SSE,
-        url: 'https://mcp.example.com/sse',
+        url: PUBLIC_IP_URL,
         headers: { Authorization: 'Bearer token-abc' },
       });
 
@@ -91,7 +100,7 @@ describe('McpServersService', () => {
       expect(saved.command).toBeNull();
       expect(result).not.toHaveProperty('headersEncrypted');
       expect(result).not.toHaveProperty('envEncrypted');
-      expect(result.url).toBe('https://mcp.example.com/sse');
+      expect(result.url).toBe(PUBLIC_IP_URL);
     });
 
     it('stdio 类型：普通用户应抛 403', async () => {
@@ -130,7 +139,65 @@ describe('McpServersService', () => {
         service.create(normalUser, {
           name: 'web-search',
           type: McpServerType.SSE,
-          url: 'https://a.com/sse',
+          url: PUBLIC_IP_URL,
+        }),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('sse 类型指向回环地址应抛 400（SSRF）', async () => {
+      repo.findOne.mockResolvedValue(null); // 名称查重通过
+
+      await expect(
+        service.create(normalUser, {
+          name: 'internal-ssrf',
+          type: McpServerType.SSE,
+          url: 'http://127.0.0.1:8080',
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('sse 类型指向云元数据/链路本地地址应抛 400（SSRF）', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.create(normalUser, {
+          name: 'metadata-ssrf',
+          type: McpServerType.SSE,
+          url: 'http://169.254.169.254/latest/meta-data/',
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('stdio 类型不做 URL 校验（无 url 字段，直接落库）', async () => {
+      repo.findOne.mockResolvedValue(null);
+
+      const result = await service.create(adminUser, {
+        name: 'fs',
+        type: McpServerType.STDIO,
+        command: 'npx',
+      });
+
+      expect(repo.save).toHaveBeenCalled();
+      expect(result.command).toBe('npx');
+    });
+
+    it('落库撞唯一索引（errno 1062）应转 409（TOCTOU 兜底）', async () => {
+      repo.findOne.mockResolvedValue(null); // 先查重通过
+      repo.save.mockRejectedValueOnce(
+        new QueryFailedError(
+          'INSERT INTO mcp_servers ...',
+          [],
+          Object.assign(new Error('Duplicate entry'), { errno: 1062, code: 'ER_DUP_ENTRY' }),
+        ),
+      );
+
+      await expect(
+        service.create(normalUser, {
+          name: 'dup-name',
+          type: McpServerType.SSE,
+          url: PUBLIC_IP_URL,
         }),
       ).rejects.toThrow(ConflictException);
     });
@@ -194,6 +261,45 @@ describe('McpServersService', () => {
         service.update(adminUser, 'srv-1', { type: McpServerType.STDIO }),
       ).rejects.toThrow(BadRequestException);
     });
+
+    it('把 url 改为回环地址应抛 400（SSRF）', async () => {
+      repo.findOne.mockResolvedValue({ ...sseServer });
+
+      await expect(
+        service.update(normalUser, 'srv-1', { url: 'http://127.0.0.1:8080' }),
+      ).rejects.toThrow(BadRequestException);
+      expect(repo.save).not.toHaveBeenCalled();
+    });
+
+    it('传 isActive=false 应停用，传 true 应重新启用', async () => {
+      repo.findOne.mockResolvedValue({ ...sseServer });
+
+      const disabled = await service.update(normalUser, 'srv-1', { isActive: false });
+      expect(disabled.isActive).toBe(false);
+      const saved = repo.save.mock.calls[0][0] as McpServer;
+      expect(saved.isActive).toBe(false);
+
+      repo.findOne.mockResolvedValue({ ...sseServer, isActive: false });
+      const enabled = await service.update(normalUser, 'srv-1', { isActive: true });
+      expect(enabled.isActive).toBe(true);
+    });
+
+    it('改名落库撞唯一索引（errno 1062）应转 409（TOCTOU 兜底）', async () => {
+      repo.findOne
+        .mockResolvedValueOnce({ ...sseServer }) // findOrFail
+        .mockResolvedValueOnce(null); // 名称查重通过
+      repo.save.mockRejectedValueOnce(
+        new QueryFailedError(
+          'UPDATE mcp_servers ...',
+          [],
+          Object.assign(new Error('Duplicate entry'), { errno: 1062, code: 'ER_DUP_ENTRY' }),
+        ),
+      );
+
+      await expect(service.update(normalUser, 'srv-1', { name: 'taken' })).rejects.toThrow(
+        ConflictException,
+      );
+    });
   });
 
   describe('remove', () => {
@@ -227,8 +333,8 @@ describe('McpServersService', () => {
       server.envEncrypted = (() => {
         // 用真实 encrypt 生成密文
         const { encrypt } = jest.requireActual(
-          'src/agents/utils/crypto.util',
-        ) as typeof import('src/agents/utils/crypto.util');
+          'src/common/utils/crypto.util',
+        ) as typeof import('src/common/utils/crypto.util');
         return encrypt(JSON.stringify({ ROOT: '/tmp' }), TEST_KEY);
       })();
 
@@ -247,8 +353,8 @@ describe('McpServersService', () => {
   describe('findByAgentConfig', () => {
     it('应通过关联表查询，过滤停用 server，并解密 env', async () => {
       const { encrypt } = jest.requireActual(
-        'src/agents/utils/crypto.util',
-      ) as typeof import('src/agents/utils/crypto.util');
+        'src/common/utils/crypto.util',
+      ) as typeof import('src/common/utils/crypto.util');
       const activeStdio: McpServer = {
         ...sseServer,
         id: 'srv-stdio',
@@ -311,6 +417,54 @@ describe('McpServersService', () => {
         ForbiddenException,
       );
       await expect(service.validateForAssociation(['srv-1'], adminUser)).resolves.toHaveLength(1);
+    });
+
+    it('普通用户关联他人创建的 server 应抛 403（跨用户凭据复用防护）', async () => {
+      const foreignServer: McpServer = {
+        ...sseServer,
+        id: 'srv-foreign',
+        createdBy: 'other-user',
+      };
+      repo.find.mockResolvedValue([foreignServer]);
+      userRepo.find.mockResolvedValue([{ id: 'other-user', role: UserRole.USER }] as never);
+
+      await expect(service.validateForAssociation(['srv-foreign'], normalUser)).rejects.toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('普通用户可关联管理员创建的 server（公共工具库）', async () => {
+      const adminServer: McpServer = { ...sseServer, id: 'srv-admin', createdBy: 'admin-1' };
+      repo.find.mockResolvedValue([adminServer]);
+      userRepo.find.mockResolvedValue([{ id: 'admin-1', role: UserRole.ADMIN }] as never);
+
+      await expect(service.validateForAssociation(['srv-admin'], normalUser)).resolves.toHaveLength(
+        1,
+      );
+      expect(userRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: expect.anything() }, select: ['id', 'role'] }),
+      );
+    });
+
+    it('管理员可关联任意创建者的 server', async () => {
+      const foreignServer: McpServer = {
+        ...sseServer,
+        id: 'srv-foreign',
+        createdBy: 'other-user',
+      };
+      repo.find.mockResolvedValue([foreignServer]);
+
+      await expect(
+        service.validateForAssociation(['srv-foreign'], adminUser),
+      ).resolves.toHaveLength(1);
+      expect(userRepo.find).not.toHaveBeenCalled();
+    });
+
+    it('普通用户可关联自己创建的 server，且不做创建者角色回查', async () => {
+      repo.find.mockResolvedValue([{ ...sseServer }]); // createdBy='user-1' = normalUser.id
+
+      await expect(service.validateForAssociation(['srv-1'], normalUser)).resolves.toHaveLength(1);
+      expect(userRepo.find).not.toHaveBeenCalled();
     });
 
     it('空数组直接返回空，不查库', async () => {

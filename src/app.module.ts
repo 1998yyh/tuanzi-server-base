@@ -8,6 +8,11 @@ import { AgentsModule } from './agents/agents.module';
 import { McpServersModule } from './mcp-servers/mcp-servers.module';
 import { SkillsModule } from './skills/skills.module';
 import { StockSignalsModule } from './stock-signals/stock-signals.module';
+import { MediaModule } from './media/media.module';
+import { AiGenerationModule } from './ai-generation/ai-generation.module';
+import { CanvasModule } from './canvas/canvas.module';
+import { PromptsModule } from './prompts/prompts.module';
+import { AssetsModule } from './assets/assets.module';
 
 @Module({
   imports: [
@@ -41,6 +46,11 @@ import { StockSignalsModule } from './stock-signals/stock-signals.module';
     McpServersModule,
     SkillsModule,
     StockSignalsModule,
+    MediaModule,
+    AiGenerationModule,
+    CanvasModule,
+    PromptsModule,
+    AssetsModule,
   ],
 })
 export class AppModule {}
