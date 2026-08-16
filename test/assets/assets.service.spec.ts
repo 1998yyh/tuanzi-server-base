@@ -5,6 +5,14 @@ import { AssetsService } from 'src/assets/assets.service';
 import { Asset, AssetKind } from 'src/assets/asset.entity';
 import { MediaService } from 'src/media/media.service';
 import { MediaKind, MediaSource } from 'src/media/media-file.entity';
+import { lookup } from 'node:dns/promises';
+
+// mock DNS：远程 URL 测试不依赖真实网络，也不受环境 DNS 影响
+jest.mock('node:dns/promises', () => ({
+  lookup: jest.fn(),
+}));
+
+const mockLookup = lookup as unknown as jest.Mock;
 
 const user = { id: 'user-1' } as never;
 
@@ -24,6 +32,8 @@ describe('AssetsService', () => {
   beforeEach(async () => {
     global.fetch = mockFetch as never;
     mockFetch.mockReset();
+    mockLookup.mockReset();
+    mockLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
     assetRepo = {
       create: jest.fn((v) => ({ id: 'asset-1', ...v })),
       save: jest.fn(async (v) => v),
@@ -115,6 +125,40 @@ describe('AssetsService', () => {
     it('非法地址报错', async () => {
       await expect(
         service.addImageFromUrl(user, { title: '图', imageUrl: 'ftp://a.com/x.png' }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('应拒绝内网/回环地址（SSRF 防护），且不发请求', async () => {
+      await expect(
+        service.addImageFromUrl(user, { title: '图', imageUrl: 'http://127.0.0.1:8080/x.png' }),
+      ).rejects.toThrow('禁止访问内网或保留地址');
+      await expect(
+        service.addImageFromUrl(user, {
+          title: '图',
+          imageUrl: 'http://169.254.169.254/latest/meta-data/',
+        }),
+      ).rejects.toThrow('禁止访问内网或保留地址');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('应拒绝重定向响应（防重定向绕过 SSRF 校验）', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        type: 'opaqueredirect',
+        status: 302,
+        headers: new Headers(),
+      });
+      await expect(
+        service.addImageFromUrl(user, { title: '图', imageUrl: 'https://a.com/x.png' }),
+      ).rejects.toThrow('不支持重定向');
+    });
+
+    it('应拒绝 SVG dataURL（防存储型 XSS）', async () => {
+      await expect(
+        service.addImageFromUrl(user, {
+          title: '图',
+          imageUrl: `data:image/svg+xml;base64,${Buffer.from('<svg/>').toString('base64')}`,
+        }),
       ).rejects.toThrow(BadRequestException);
     });
   });

@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { User } from '../users/users.entity';
 import { MediaFileView, MediaKind, MediaSource } from '../media/media-file.entity';
 import { MediaService } from '../media/media.service';
+import { assertPublicUrl } from '../common/utils/ssrf.util';
 import { Asset, AssetKind } from './asset.entity';
 import { CreateAssetDto, QueryAssetsDto } from './dto/asset.dto';
 
@@ -13,6 +14,8 @@ type CurrentUser = Omit<User, 'password'>;
 export type AssetView = Omit<Asset, 'user' | 'media'> & { media: MediaFileView | null };
 
 const MAX_IMPORT_BYTES = 50 * 1024 * 1024;
+/** dataURL / 远程下载允许的图片类型（拒绝 svg 等可执行脚本内容） */
+const ALLOWED_IMAGE_MIME = /^image\/(png|jpe?g|webp|gif)$/;
 
 @Injectable()
 export class AssetsService {
@@ -114,31 +117,56 @@ export class AssetsService {
     await this.assetRepo.remove(asset);
   }
 
-  /** 下载远程图片 / 解码 dataURL，统一为 buffer */
+  /** 下载远程图片 / 解码 dataURL，统一为 buffer（带 SSRF 防护与大小上限） */
   private async fetchImage(imageUrl: string): Promise<{ buffer: Buffer; mimeType: string }> {
     const dataUrlMatch = imageUrl.match(/^data:(image\/[\w+.-]+);base64,(.+)$/s);
     if (dataUrlMatch) {
+      const mimeType = dataUrlMatch[1].toLowerCase();
+      if (!ALLOWED_IMAGE_MIME.test(mimeType)) {
+        throw new BadRequestException('仅支持 png/jpeg/webp/gif 格式的图片 dataURL');
+      }
       const buffer = Buffer.from(dataUrlMatch[2], 'base64');
       if (buffer.byteLength > MAX_IMPORT_BYTES) throw new BadRequestException('图片超过 50MB 限制');
-      return { buffer, mimeType: dataUrlMatch[1] };
+      return { buffer, mimeType };
     }
     if (!/^https?:\/\//i.test(imageUrl)) {
       throw new BadRequestException('imageUrl 必须是 http(s) 地址或 dataURL');
     }
+    // SSRF 防护：拒绝私网/回环/链路本地/云元数据等地址（含 DNS 解析后的校验）
+    const url = await assertPublicUrl(imageUrl);
     let response: Response;
     try {
-      response = await fetch(imageUrl, { signal: AbortSignal.timeout(60_000) });
+      response = await fetch(url, { signal: AbortSignal.timeout(60_000), redirect: 'manual' });
     } catch {
       throw new BadRequestException('图片下载失败，请检查地址是否可访问');
+    }
+    if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+      throw new BadRequestException('图片下载失败：不支持重定向地址');
     }
     if (!response.ok) throw new BadRequestException(`图片下载失败（HTTP ${response.status}）`);
     const contentLength = Number(response.headers.get('content-length') ?? 0);
     if (contentLength > MAX_IMPORT_BYTES) throw new BadRequestException('图片超过 50MB 限制');
     const mimeType = response.headers.get('content-type')?.split(';')[0] || 'image/png';
-    if (!mimeType.startsWith('image/')) throw new BadRequestException('地址内容不是图片');
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.byteLength > MAX_IMPORT_BYTES) throw new BadRequestException('图片超过 50MB 限制');
+    if (!ALLOWED_IMAGE_MIME.test(mimeType.toLowerCase())) {
+      throw new BadRequestException('地址内容不是图片');
+    }
+    const buffer = await this.readBodyWithLimit(response, MAX_IMPORT_BYTES);
     return { buffer, mimeType };
+  }
+
+  /** 流式读取响应体并累计字节数，超限即中止（防 chunked 无上限读入内存） */
+  private async readBodyWithLimit(response: Response, maxBytes: number): Promise<Buffer> {
+    if (!response.body) throw new BadRequestException('图片下载失败：响应为空');
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        throw new BadRequestException(`内容超过 ${Math.floor(maxBytes / 1024 / 1024)}MB 限制`);
+      }
+      chunks.push(Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
   }
 
   private toView(asset: Asset): AssetView {

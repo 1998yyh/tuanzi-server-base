@@ -26,7 +26,7 @@ export class CreateAssetDto {
 
   @ApiProperty({ required: false, description: '文本内容（kind=text 必填）' })
   @IsString()
-  @Length(0, 100000)
+  @Length(0, 50000)
   @IsOptional()
   textContent?: string;
 
