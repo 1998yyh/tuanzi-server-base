@@ -205,5 +205,42 @@ describe('AuthService', () => {
         UnauthorizedException,
       );
     });
+
+    it('数据库故障应原样上抛（500），不能伪装成 401', async () => {
+      jwtService.verify.mockReturnValue({ sub: 'test-uuid', type: TokenType.REFRESH });
+      usersService.findById.mockRejectedValue(new Error('数据库连接断开'));
+
+      await expect(service.refreshByToken('validRefreshToken')).rejects.toThrow('数据库连接断开');
+      await expect(service.refreshByToken('validRefreshToken')).rejects.not.toThrow(
+        '无效的刷新令牌',
+      );
+    });
+  });
+
+  describe('配置校验（fail-fast）', () => {
+    it('JWT_EXPIRES_IN 为非数字时应抛出配置错误', () => {
+      const badConfig = { get: jest.fn(() => 'abc') };
+      expect(
+        () => new AuthService(usersService, jwtService, badConfig as unknown as ConfigService),
+      ).toThrow('JWT_EXPIRES_IN 必须是正整数秒数');
+    });
+
+    it('JWT_EXPIRES_IN 为 0 或负数时应抛出配置错误', () => {
+      const badConfig = { get: jest.fn(() => '0') };
+      expect(
+        () => new AuthService(usersService, jwtService, badConfig as unknown as ConfigService),
+      ).toThrow('JWT_EXPIRES_IN 必须是正整数秒数');
+    });
+
+    it('JWT_REFRESH_EXPIRES_IN 为非数字时应抛出配置错误', () => {
+      const badConfig = {
+        get: jest.fn((key: string, defaultValue?: unknown) =>
+          key === 'JWT_REFRESH_EXPIRES_IN' ? '7days' : (defaultValue ?? '7200'),
+        ),
+      };
+      expect(
+        () => new AuthService(usersService, jwtService, badConfig as unknown as ConfigService),
+      ).toThrow('JWT_REFRESH_EXPIRES_IN 必须是正整数秒数');
+    });
   });
 });
