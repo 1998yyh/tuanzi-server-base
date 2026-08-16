@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleInit,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import type { User } from '../users/users.entity';
@@ -32,7 +38,7 @@ const UPSERT_CHUNK = 500;
  * 强制刷新创建新任务重扫并 upsert 覆盖（历史以最新 done 任务为准）。
  */
 @Injectable()
-export class StockSignalsService {
+export class StockSignalsService implements OnModuleInit {
   private readonly logger = new Logger(StockSignalsService.name);
   /** 代码 → 清单项索引（名称、市场前缀以清单为准） */
   private readonly stockMap = new Map(STOCK_LIST.map((s) => [s.code, s]));
@@ -45,6 +51,26 @@ export class StockSignalsService {
     private readonly scanner: SinaScannerService,
   ) {}
 
+  /**
+   * 进程启动时恢复遗留任务：PENDING/RUNNING 都是上一进程退出时失联的任务
+   * （状态机只能由存活进程推进，原进程已退出不会再更新），统一置为 FAILED，
+   * 避免前端轮询永久卡住。onModuleInit 只在进程启动瞬间执行，此时不可能有
+   * 活跃任务，不会误伤正常运行的 run。
+   */
+  async onModuleInit() {
+    const stale = await this.runRepo.find({
+      where: [{ status: ScanRunStatus.PENDING }, { status: ScanRunStatus.RUNNING }],
+    });
+    if (stale.length === 0) return;
+    await this.runRepo.update(
+      stale.map((r) => r.id),
+      { status: ScanRunStatus.FAILED },
+    );
+    this.logger.log(
+      `进程重启恢复：将 ${stale.length} 个遗留扫描任务（pending/running）置为 FAILED`,
+    );
+  }
+
   // ---- 扫描入口 ----
 
   /**
@@ -53,6 +79,7 @@ export class StockSignalsService {
    */
   async requestScan(user: CurrentUser, dto: CreateScanDto) {
     const date = dto.date ?? this.chinaToday();
+    this.assertValidDate(date);
     if (date > this.chinaToday()) {
       throw new BadRequestException('不能查询未来日期');
     }
@@ -75,23 +102,28 @@ export class StockSignalsService {
     const run = await this.runRepo.save(
       this.runRepo.create({ queryDate: date, createdBy: user.id }),
     );
-    // 异步执行，不阻塞响应；失败在 executeRun 内部落入 run.status
-    void this.executeRun(run.id);
+    // 异步执行，不阻塞响应；失败在 executeRun 内部落入 run.status，
+    // 兜底 catch 防止任何未捕获 rejection
+    void this.executeRun(run.id).catch((e) =>
+      this.logger.error('全市场扫描任务异常', e?.stack ?? e),
+    );
     return { run, cached: false };
   }
 
-  /** 任务状态（轮询用）：done 时附 B 列表 */
+  /** 任务状态（轮询用）：done 时附 B 列表；公开接口剔除 createdBy，不泄露触发人 */
   async getRun(id: string) {
     const run = await this.runRepo.findOne({ where: { id } });
     if (!run) throw new NotFoundException(`扫描任务 #${id} 不存在`);
-    if (run.status !== ScanRunStatus.DONE) return { run };
-    return { run, items: await this.findBItems(run.queryDate) };
+    const { createdBy, ...rest } = run;
+    if (run.status !== ScanRunStatus.DONE) return { run: rest };
+    return { run: rest, items: await this.findBItems(run.queryDate) };
   }
 
   // ---- 结果查询（公开） ----
 
   /** 某日结果明细：取该日期最新 done 任务，没有则 404（前端据此提示「尚未扫描」） */
   async getByDate(date: string) {
+    this.assertValidDate(date);
     const run = await this.latestDoneRun(date);
     if (!run) throw new NotFoundException('该日期还没有扫描数据，请先发起扫描');
     return {
@@ -125,16 +157,20 @@ export class StockSignalsService {
 
   // ---- 全市场异步任务 ----
 
+  /**
+   * 异步执行全市场扫描（fire-and-forget）。任何 DB 故障（含状态写库失败）都只
+   * 落入 status=failed 并记日志，promise 绝不向上抛；调用方另挂兜底 catch 双保险。
+   */
   private async executeRun(runId: string) {
-    const run = await this.runRepo.findOne({ where: { id: runId } });
-    if (!run) return;
-
-    await this.runRepo.update(runId, {
-      status: ScanRunStatus.RUNNING,
-      total: STOCK_LIST.length,
-    });
-
     try {
+      const run = await this.runRepo.findOne({ where: { id: runId } });
+      if (!run) return;
+
+      await this.runRepo.update(runId, {
+        status: ScanRunStatus.RUNNING,
+        total: STOCK_LIST.length,
+      });
+
       let lastFlushed = 0;
       const { results, failures } = await this.scanner.scan(
         STOCK_LIST,
@@ -170,8 +206,16 @@ export class StockSignalsService {
         failedCodes: failures,
       });
     } catch (err) {
-      this.logger.error(`扫描任务 ${runId} 失败`, (err as Error).stack);
-      await this.runRepo.update(runId, { status: ScanRunStatus.FAILED });
+      this.logger.error(`扫描任务 ${runId} 失败`, (err as Error).stack ?? err);
+      try {
+        await this.runRepo.update(runId, { status: ScanRunStatus.FAILED });
+      } catch (updateErr) {
+        // 状态写库失败只记日志，绝不向上抛——否则 executeRun 的 promise 会 rejected
+        this.logger.error(
+          `扫描任务 ${runId} 状态置为失败时写库异常`,
+          (updateErr as Error).stack ?? updateErr,
+        );
+      }
     }
   }
 
@@ -269,6 +313,18 @@ export class StockSignalsService {
       order: { code: 'ASC' },
     });
     return rows.map((r) => ({ code: r.code, market: r.market, name: r.name }));
+  }
+
+  /**
+   * 校验 YYYY-MM-DD 是否为真实存在的日历日期。
+   * DTO 正则只保证形状，`2026-02-30` 之类会打到 MySQL 报 500，这里统一在
+   * service 入口拦截；isWeekend 的 Invalid Date 问题随之自然解决。
+   */
+  private assertValidDate(date: string): void {
+    const d = new Date(`${date}T00:00:00Z`);
+    if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== date) {
+      throw new BadRequestException('date 不是有效的日期');
+    }
   }
 
   /** 是否周末（按日历日判断，与服务器时区无关） */

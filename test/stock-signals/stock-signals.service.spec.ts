@@ -192,4 +192,92 @@ describe('StockSignalsService', () => {
       expect(dates.map((d) => d.date)).toEqual(['2026-07-31', '2026-07-30']);
     });
   });
+
+  describe('getRun（公开轮询）', () => {
+    it('任务不存在抛 404', async () => {
+      runRepo.findOne.mockResolvedValue(null);
+      await expect(service.getRun('run-x')).rejects.toThrow(NotFoundException);
+    });
+
+    it('响应不含 createdBy，不泄露触发人', async () => {
+      runRepo.findOne.mockResolvedValue(makeRun({ status: ScanRunStatus.RUNNING }));
+      const res = await service.getRun('run-1');
+      expect(res.run).not.toHaveProperty('createdBy');
+      expect(res.run).toHaveProperty('id', 'run-1');
+      expect(res.run).toHaveProperty('status', ScanRunStatus.RUNNING);
+    });
+
+    it('done 任务附带 B 列表且同样不含 createdBy', async () => {
+      runRepo.findOne.mockResolvedValue(makeRun());
+      signalRepo.find.mockResolvedValue([
+        { code: '000001', market: 'sz', name: '平安银行', value: '1' },
+      ]);
+      const res = await service.getRun('run-1');
+      expect(res.items).toEqual([{ code: '000001', market: 'sz', name: '平安银行' }]);
+      expect(res.run).not.toHaveProperty('createdBy');
+    });
+  });
+
+  describe('非法日期（日历合法性）', () => {
+    it('getByDate：2026-02-30 抛 BadRequestException', async () => {
+      await expect(service.getByDate('2026-02-30')).rejects.toThrow(BadRequestException);
+      await expect(service.getByDate('2026-02-30')).rejects.toThrow('date 不是有效的日期');
+    });
+
+    it('requestScan：2026-02-30 抛 BadRequestException，不建任务不抓取', async () => {
+      await expect(service.requestScan(user, { date: '2026-02-30' })).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(runRepo.save).not.toHaveBeenCalled();
+      expect(scanner.scan).not.toHaveBeenCalled();
+    });
+
+    it('闰年 2024-02-29 是有效日期，正常放行', async () => {
+      runRepo.findOne.mockResolvedValue(makeRun({ id: 'run-leap', queryDate: '2024-02-29' }));
+      scanner.scan.mockResolvedValue({ results: [], failures: [] });
+      await expect(service.requestScan(user, { date: '2024-02-29' })).resolves.toBeDefined();
+    });
+  });
+
+  describe('onModuleInit（重启恢复卡死任务）', () => {
+    it('把遗留的 PENDING/RUNNING 任务批量置为 FAILED 并记录恢复数量', async () => {
+      runRepo.find.mockResolvedValue([
+        makeRun({ id: 'r1', status: ScanRunStatus.PENDING }),
+        makeRun({ id: 'r2', status: ScanRunStatus.RUNNING }),
+      ]);
+      runRepo.update.mockResolvedValue({ affected: 2 });
+      const logSpy = jest.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
+
+      await service.onModuleInit();
+
+      expect(runRepo.update).toHaveBeenCalledWith(['r1', 'r2'], {
+        status: ScanRunStatus.FAILED,
+      });
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('2'));
+      logSpy.mockRestore();
+    });
+
+    it('没有遗留任务时不做任何写库', async () => {
+      runRepo.find.mockResolvedValue([]);
+      await service.onModuleInit();
+      expect(runRepo.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('executeRun（异步任务，DB 故障不 rejected）', () => {
+    it('RUNNING 写库抛错：promise 不 rejected，记日志，FAILED 写库失败也不上抛', async () => {
+      runRepo.findOne.mockResolvedValue(makeRun({ status: ScanRunStatus.PENDING }));
+      runRepo.update.mockRejectedValue(new Error('DB down'));
+      const errorSpy = jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+
+      await expect(service['executeRun']('run-1')).resolves.toBeUndefined();
+
+      expect(runRepo.update).toHaveBeenCalledWith(
+        'run-1',
+        expect.objectContaining({ status: ScanRunStatus.RUNNING }),
+      );
+      expect(errorSpy).toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+  });
 });
