@@ -95,6 +95,14 @@ describe('AgentsService', () => {
             save: jest.fn(async (v) => v),
             findOne: jest.fn(),
             findAndCount: jest.fn(),
+            // findAll 的 N+1 修复：批量查渠道走 agentRepo.manager.getRepository(AiChannel)
+            manager: {
+              getRepository: jest.fn(() => ({
+                find: jest.fn(async () => [
+                  { id: 'ch-1', name: '公司网关', apiFormat: ApiFormat.OPENAI },
+                ]),
+              })),
+            },
           },
         },
         { provide: McpServersService, useValue: mcpServersService },

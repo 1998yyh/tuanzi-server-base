@@ -19,6 +19,11 @@ import { SkillsModule } from '../skills/skills.module';
 import { DailyReportsModule } from '../daily-reports/daily-reports.module';
 import { ScheduledTask } from './scheduled-tasks/scheduled-task.entity';
 import { ScheduledTasksService } from './scheduled-tasks/scheduled-tasks.service';
+import { BackgroundTask } from './background-tasks/background-task.entity';
+import { BackgroundTasksService } from './background-tasks/background-tasks.service';
+import { BackgroundTasksController } from './background-tasks/background-tasks.controller';
+import { ConversationExecutionLock } from './utils/conversation-execution-lock';
+import { DelegateToolFactory } from './tools/delegate-tool.factory';
 import { CanvasToolsService } from './tools/canvas/canvas-tools.service';
 import { CanvasModule } from '../canvas/canvas.module';
 import { AiGenerationModule } from '../ai-generation/ai-generation.module';
@@ -35,6 +40,7 @@ import { AssetsModule } from '../assets/assets.module';
       AgentCheckpoint,
       AgentCheckpointWrite,
       ScheduledTask,
+      BackgroundTask,
     ]),
     McpServersModule,
     SkillsModule,
@@ -45,7 +51,7 @@ import { AssetsModule } from '../assets/assets.module';
     PromptsModule,
     AssetsModule,
   ],
-  controllers: [AgentsController, ConversationsController],
+  controllers: [AgentsController, ConversationsController, BackgroundTasksController],
   providers: [
     AgentsService,
     ConversationsService,
@@ -53,6 +59,9 @@ import { AssetsModule } from '../assets/assets.module';
     ToolRegistryService,
     TypeORMCheckpointer,
     ScheduledTasksService,
+    BackgroundTasksService,
+    ConversationExecutionLock,
+    DelegateToolFactory,
     CanvasToolsService,
     encryptionKeyProvider,
   ],

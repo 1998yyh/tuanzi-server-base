@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { BadRequestException } from '@nestjs/common';
 import { MemorySaver } from '@langchain/langgraph';
 import { AIMessage } from '@langchain/core/messages';
 import { StructuredToolInterface } from '@langchain/core/tools';
@@ -155,10 +156,13 @@ describe('AgentExecutorService', () => {
       const result = await service.run(buildAgent(), 'conv-1', '6乘7等于几');
 
       expect(mockInvoke).toHaveBeenCalledTimes(2);
-      // 第二参经 metadata 透传 tool_call_id，供 SSE 事件与历史归组配对
+      // 第二参经 metadata 透传 tool_call_id（SSE 事件配对），并携带中止 signal
       expect(calculatorTool.invoke).toHaveBeenCalledWith(
         { expression: '6*7' },
-        { metadata: { tool_call_id: 'call_1' } },
+        expect.objectContaining({
+          metadata: { tool_call_id: 'call_1' },
+          signal: expect.any(AbortSignal),
+        }),
       );
       expect(result).toHaveLength(3);
       expect(result[0]).toMatchObject({
@@ -215,11 +219,11 @@ describe('AgentExecutorService', () => {
       expect(result[2].content).toBe('抱歉，我没法查');
     });
 
-    it('工具抛异常时应该把错误信息作为工具结果返回给 LLM', async () => {
+    it('工具抛未知异常时应该脱敏为通用文案（内部细节不进消息表），完整错误进服务端日志', async () => {
       const failingTool = {
         name: 'calculator',
         invoke: jest.fn(async () => {
-          throw new Error('除零错误');
+          throw new Error('connect ECONNREFUSED 10.0.0.5:3389');
         }),
       } as unknown as StructuredToolInterface;
       toolRegistry.getToolsForAgent.mockResolvedValue([failingTool]);
@@ -231,11 +235,82 @@ describe('AgentExecutorService', () => {
           }),
         )
         .mockResolvedValueOnce(new AIMessage({ content: '计算失败了' }));
+      const loggerErrorSpy = jest
+        .spyOn(service['logger'], 'error')
+        .mockImplementation(() => undefined);
 
       const result = await service.run(buildAgent(), 'conv-1', '算一下');
 
-      expect(result[1].content).toContain('工具调用失败: 除零错误');
-      expect(result[2].content).toBe('计算失败了');
+      expect(result[1].content).toBe('工具执行失败，请稍后重试');
+      expect(result[1].content).not.toContain('ECONNREFUSED');
+      expect(loggerErrorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('工具执行异常: connect ECONNREFUSED'),
+        expect.stringContaining('Error'),
+      );
+      loggerErrorSpy.mockRestore();
+    });
+
+    it('工具抛 HttpException 时应保留中文业务文案喂给 LLM', async () => {
+      const failingTool = {
+        name: 'calculator',
+        invoke: jest.fn(async () => {
+          throw new BadRequestException('任务间隔不能少于 1 小时');
+        }),
+      } as unknown as StructuredToolInterface;
+      toolRegistry.getToolsForAgent.mockResolvedValue([failingTool]);
+      mockInvoke
+        .mockResolvedValueOnce(
+          new AIMessage({
+            content: '',
+            tool_calls: [{ id: 'call_1', name: 'calculator', args: {} }],
+          }),
+        )
+        .mockResolvedValueOnce(new AIMessage({ content: '明白了' }));
+
+      const result = await service.run(buildAgent(), 'conv-1', '建个任务');
+
+      expect(result[1].content).toBe('任务间隔不能少于 1 小时');
+    });
+
+    it('工具超时后应中止底层执行（signal.aborted=true）并把超时文案喂给 LLM', async () => {
+      jest.useFakeTimers();
+      try {
+        let capturedSignal: AbortSignal | undefined;
+        const hangingTool = {
+          name: 'calculator',
+          invoke: jest.fn(async (_args: unknown, config: { signal?: AbortSignal }) => {
+            capturedSignal = config?.signal;
+            // 一直挂起直到被 abort
+            await new Promise<void>((resolve) => {
+              const poll = () => {
+                if (capturedSignal?.aborted) resolve();
+                else setTimeout(poll, 10);
+              };
+              poll();
+            });
+            return '最终完成';
+          }),
+        } as unknown as StructuredToolInterface;
+        toolRegistry.getToolsForAgent.mockResolvedValue([hangingTool]);
+        mockInvoke
+          .mockResolvedValueOnce(
+            new AIMessage({
+              content: '',
+              tool_calls: [{ id: 'call_1', name: 'calculator', args: {} }],
+            }),
+          )
+          .mockResolvedValueOnce(new AIMessage({ content: '超时了，稍后再说' }));
+
+        const runPromise = service.run(buildAgent(), 'conv-1', '算一下');
+        await jest.advanceTimersByTimeAsync(30_000);
+        const result = await runPromise;
+
+        expect(capturedSignal?.aborted).toBe(true);
+        expect(result[1].content).toBe('工具调用超时（30s）');
+        expect(result[2].content).toBe('超时了，稍后再说');
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     it('第二轮对话不应该把历史消息重复计入返回', async () => {

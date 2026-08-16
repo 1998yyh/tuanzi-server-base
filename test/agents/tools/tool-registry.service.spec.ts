@@ -194,6 +194,57 @@ describe('ToolRegistryService', () => {
       expect(mockConnect).toHaveBeenCalledTimes(2);
     });
 
+    it('相同 command 相同 args 不同 env 的 stdio server 不应该复用连接', async () => {
+      await service.getToolsForAgent(buildAgent(), [stdioServer]);
+      await service.getToolsForAgent(buildAgent(), [
+        { ...stdioServer, env: { ROOT: '/elsewhere' } },
+      ]);
+
+      expect(mockConnect).toHaveBeenCalledTimes(2);
+    });
+
+    it('相同 url 不同 headers 的 http server 不应该复用连接', async () => {
+      await service.getToolsForAgent(buildAgent(), [sseServer]);
+      await service.getToolsForAgent(buildAgent(), [
+        { ...sseServer, headers: { Authorization: 'Bearer changed' } },
+      ]);
+
+      expect(mockConnect).toHaveBeenCalledTimes(2);
+    });
+
+    it('并发调用相同 server 应该单飞共享同一个 connect（只连一次）', async () => {
+      let resolveConnect: () => void;
+      mockConnect.mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveConnect = resolve;
+          }),
+      );
+
+      const p1 = service.getToolsForAgent(buildAgent(), [sseServer]);
+      const p2 = service.getToolsForAgent(buildAgent(), [sseServer]);
+      resolveConnect!();
+
+      const [r1, r2] = await Promise.all([p1, p2]);
+
+      expect(mockConnect).toHaveBeenCalledTimes(1);
+      expect(r1).toEqual([{ name: 'mcp_tool' }]);
+      expect(r2).toEqual([{ name: 'mcp_tool' }]);
+    });
+
+    it('连接失败应该 close 已建立的 client 防泄漏，且下次调用可重新连接', async () => {
+      mockConnect.mockRejectedValueOnce(new Error('connection refused'));
+      const tools = await service.getToolsForAgent(buildAgent(), [sseServer]);
+      expect(tools).toEqual([]);
+      expect(mockClose).toHaveBeenCalledTimes(1);
+
+      // 失败后单飞条目已清除，下次调用应重试成功
+      mockConnect.mockResolvedValueOnce(undefined);
+      const retried = await service.getToolsForAgent(buildAgent(), [sseServer]);
+      expect(mockConnect).toHaveBeenCalledTimes(2);
+      expect(retried).toEqual([{ name: 'mcp_tool' }]);
+    });
+
     it('MCP 连接失败应该跳过该 Server 而不阻断整体', async () => {
       mockConnect.mockRejectedValue(new Error('connection refused'));
 

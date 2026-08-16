@@ -38,11 +38,20 @@ export const AGENT_SCOPED_TOOL_NAMES: readonly string[] = [
   'write_daily_report',
   'list_scheduled_tasks',
   'delete_scheduled_task',
+  'run_background_task',
   ...CANVAS_TOOL_NAMES,
 ];
+
+/**
+ * 执行器按运行注入的工具（registry 查不到，getToolsForAgent 应跳过不告警）：
+ * delegate_task 需要 runStream 的 subHook 回调才能工作，由 AgentExecutorService
+ * 在流式执行时注入。
+ */
+export const EXECUTOR_INJECTED_TOOL_NAMES: readonly string[] = ['delegate_task'];
 
 /** 全部可启用的内置工具名（Skill.enabledTools 等校验用） */
 export const ALL_BUILTIN_TOOL_NAMES: readonly string[] = [
   ...BUILTIN_TOOL_NAMES,
   ...AGENT_SCOPED_TOOL_NAMES,
+  ...EXECUTOR_INJECTED_TOOL_NAMES,
 ];

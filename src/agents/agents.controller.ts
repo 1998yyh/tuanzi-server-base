@@ -51,7 +51,10 @@ export class AgentsController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Agent 详情', description: 'API Key 只返回脱敏后 4 位' })
+  @ApiOperation({
+    summary: 'Agent 详情',
+    description: '渠道信息只返回展示字段，API Key 密文不出现在响应中',
+  })
   @ApiResponse({ status: 200, description: '获取成功', type: AgentResponseDto })
   @ApiResponse({ status: 404, description: 'Agent 不存在' })
   async findOne(

@@ -87,21 +87,49 @@ export class ConversationsController {
       res.setHeader('Connection', 'keep-alive');
       res.flushHeaders();
 
+      // 客户端断开（close 事件）时中止底层 LangGraph 执行，
+      // 避免断线后 LLM 调用 / 工具副作用仍在后台空跑
+      const abortController = new AbortController();
+      const onClose = () => abortController.abort();
+      res.on('close', onClose);
+
       try {
         for await (const event of this.conversationsService.streamMessages(
           conversation,
           dto.content,
+          { signal: abortController.signal },
         )) {
-          res.write(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
+          // 断线中止后不再向已关闭的响应写数据
+          if (abortController.signal.aborted) break;
+          try {
+            res.write(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
+          } catch (writeErr) {
+            // 响应已关闭（客户端断线）时 res.write 可能抛错：停止写入，交由 close 路径收尾
+            this.logger.warn(
+              `会话 ${id} 响应写入失败，停止 SSE 推送: ${(writeErr as Error).message}`,
+            );
+            break;
+          }
         }
       } catch (e) {
-        // 流式执行中的任意异常：响应头已 flush、状态码无法再改，只能以 SSE error 事件透出。
-        // 完整原文进服务端日志；前端只拿到分类 code + 固定中文文案（不外泄上游细节）。
-        this.logger.error(`会话 ${id} 流式执行异常: ${(e as Error).message}`, (e as Error).stack);
-        const { code, message } = classifyStreamError(e);
-        res.write(`event: error\ndata: ${JSON.stringify({ code, message })}\n\n`);
+        if (abortController.signal.aborted) {
+          // 断线中止导致的异常：客户端已不在，无需（也无法）发送 error 事件
+          this.logger.warn(`会话 ${id} 客户端断开，已中止流式执行`);
+        } else {
+          // 流式执行中的任意异常：响应头已 flush、状态码无法再改，只能以 SSE error 事件透出。
+          // 完整原文进服务端日志；前端只拿到分类 code + 固定中文文案（不外泄上游细节）。
+          this.logger.error(`会话 ${id} 流式执行异常: ${(e as Error).message}`, (e as Error).stack);
+          const { code, message } = classifyStreamError(e);
+          try {
+            res.write(`event: error\ndata: ${JSON.stringify({ code, message })}\n\n`);
+          } catch {
+            // 响应已关闭则放弃发送 error 事件
+          }
+        }
+      } finally {
+        res.removeListener('close', onClose);
+        res.end();
       }
-      res.end();
       return;
     }
 

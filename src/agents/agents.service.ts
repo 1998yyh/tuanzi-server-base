@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { User } from '../users/users.entity';
 import { AgentConfig } from './entities/agent-config.entity';
 import { McpServersService } from '../mcp-servers/mcp-servers.service';
@@ -12,6 +12,7 @@ import { UpdateAgentDto } from './dto/update-agent.dto';
 import { QueryAgentsDto } from './dto/query-agents.dto';
 import { AgentResponseDto } from './dto/agent-response.dto';
 import { AiChannelsService } from '../ai-generation/ai-channels.service';
+import { AiChannel } from '../ai-generation/entities/ai-channel.entity';
 
 type CurrentUser = Omit<User, 'password'>;
 
@@ -50,7 +51,7 @@ export class AgentsService {
         enabledTools: dto.enabledTools ?? [],
       }),
     );
-    return this.toResponse(agent);
+    return this.toResponse(agent, await this.aiChannelsService.getById(agent.channelId));
   }
 
   async findAll(userId: string, query: QueryAgentsDto) {
@@ -61,8 +62,10 @@ export class AgentsService {
       skip: (page - 1) * limit,
       take: limit,
     });
+    // N+1 修复：一次性批量查本页所有渠道（只取展示字段），不再逐条 getById
+    const channelMap = await this.loadChannelMap(items.map((a) => a.channelId));
     return {
-      items: await Promise.all(items.map((a) => this.toResponse(a))),
+      items: items.map((a) => this.toResponse(a, channelMap.get(a.channelId) ?? null)),
       total,
       page,
       limit,
@@ -72,7 +75,7 @@ export class AgentsService {
 
   async findOne(userId: string, id: string): Promise<AgentResponseDto> {
     const agent = await this.findOwnedOrFail(userId, id);
-    return this.toResponse(agent);
+    return this.toResponse(agent, await this.aiChannelsService.getById(agent.channelId));
   }
 
   async update(user: CurrentUser, id: string, dto: UpdateAgentDto): Promise<AgentResponseDto> {
@@ -98,9 +101,10 @@ export class AgentsService {
     if (dto.maxTokens !== undefined) agent.maxTokens = dto.maxTokens;
     if (dto.maxIterations !== undefined) agent.maxIterations = dto.maxIterations;
     if (dto.enabledTools !== undefined) agent.enabledTools = dto.enabledTools;
+    if (dto.isActive !== undefined) agent.isActive = dto.isActive;
 
     const saved = await this.agentRepo.save(agent);
-    return this.toResponse(saved);
+    return this.toResponse(saved, await this.aiChannelsService.getById(saved.channelId));
   }
 
   /** 软删除：is_active = false；重新激活通过 update 传 isActive=true */
@@ -152,9 +156,8 @@ export class AgentsService {
     return agent;
   }
 
-  /** 响应拼装：channelName/apiFormat 来自渠道轻量查询（不解密），密文绝不出现 */
-  private async toResponse(agent: AgentConfig): Promise<AgentResponseDto> {
-    const channel = await this.aiChannelsService.getById(agent.channelId);
+  /** 响应拼装（同步）：渠道信息由调用方传入，channelName/apiFormat 来自渠道轻量查询（不解密），密文绝不出现 */
+  private toResponse(agent: AgentConfig, channel: AiChannel | null): AgentResponseDto {
     return {
       id: agent.id,
       name: agent.name,
@@ -171,5 +174,15 @@ export class AgentsService {
       createdAt: agent.createdAt,
       updatedAt: agent.updatedAt,
     };
+  }
+
+  /** 批量查询渠道展示字段（id/name/apiFormat），避免逐条 getById 的 N+1 */
+  private async loadChannelMap(channelIds: string[]): Promise<Map<string, AiChannel>> {
+    const uniqueIds = [...new Set(channelIds.filter((id): id is string => !!id))];
+    if (!uniqueIds.length) return new Map();
+    const channels = await this.agentRepo.manager
+      .getRepository(AiChannel)
+      .find({ where: { id: In(uniqueIds) }, select: ['id', 'name', 'apiFormat'] });
+    return new Map(channels.map((c) => [c.id, c]));
   }
 }

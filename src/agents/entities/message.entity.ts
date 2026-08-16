@@ -28,6 +28,7 @@ export interface ToolCallRecord {
  */
 @Entity('messages')
 @Index(['conversationId', 'createdAt'])
+@Index(['conversationId', 'seq'])
 export class Message {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -55,12 +56,20 @@ export class Message {
   @Column({ type: 'text' })
   content: string;
 
+  /** 推理模型的思考过程（thinking 块全文），仅支持推理的 assistant 消息有值 */
+  @Column({ type: 'text', nullable: true })
+  reasoning: string | null;
+
   @Column({ name: 'tool_calls', type: 'json', nullable: true })
   toolCalls: ToolCallRecord[] | null;
 
   /** tool 结果消息关联的 call id */
   @Column({ name: 'tool_call_id', type: 'varchar', length: 255, nullable: true })
   toolCallId: string | null;
+
+  /** 工具执行是否失败（仅 role=tool 有意义），供前端工具卡片错误态展示 */
+  @Column({ name: 'is_error', type: 'boolean', default: false })
+  isError: boolean;
 
   /**
    * 累计 token 消耗（input+output），仅 assistant 消息有值，其余为 NULL。

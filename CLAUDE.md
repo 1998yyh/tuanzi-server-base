@@ -36,6 +36,24 @@ src/
 - **画布平台**（2026-08 从 infinite-canvas 迁移，AGPL-3.0，见根目录 NOTICE 与 `docs/plans/2026-08-07-canvas-platform-design.md`）：画布文档 = `canvas_projects.document` JSON 列 + version 乐观锁，所有写路径走 `CanvasDocumentService.applyMutation`；视频生成任务化（POST 立即返回 taskId，cron 10s 轮询回填）；模块依赖方向 CanvasModule ← AiGenerationModule ← AgentsModule（无环）。**自定义调用脚本 v1 不支持**（服务端 `new Function` = RCE 风险，决策见设计文档 §1）。
 - `uploads/` 目录（仓库根）存封面图，`main.ts` 静态服务在 `/uploads/` 前缀（注意在 `/api` 前缀之外，前端拼 URL 要补 origin）。
 - `agents/` 要点：**ChatModel 按 Agent 的数据库配置动态创建**（provider/model/apiKey 均落库，原 `src/llm/` 全局 env 配置模块已删除）；会话状态用 TypeORMCheckpointer（thread_id = conversationId）持久化；API Key AES-256-GCM 加密存储（密钥为必填环境变量 `AGENT_ENCRYPTION_KEY`，64 位 hex）；stdio 类型 MCP 仅 `role=admin` 用户可配置（首个管理员需手工 SQL 提权）；同一会话必须串行发消息（前端契约，后端未做行锁）。
+- `agents/` 执行引擎不变式（2026-08 DSH 交互移植，踩坑实录）：① **`iterations: 0` 必须随每次图运行重置**（run/runStream/runSubAgent/runBatch 四个入口）——checkpoint 恢复会带上历史累计值，累计 ≥ maxIterations 后条件边永久跳过 tools_node，留下无 tool 回应的 tool_calls 毒化后续每一轮；② **子代理事件隔离**：LangChain callback 传播会让子图 streamEvents 全部冒泡到外层 streamEvents，且两边节点同名（agent_node/tools_node）——子运行必须带 `metadata.subAgentRun=true`（可继承标记），外层 pump 丢弃带标事件，子轨迹只经 subHook 旁路以 `sub_event { callId, ... }` 注入合并队列；③ **同会话执行锁** `ConversationExecutionLock`（内存 FIFO）：streamMessages 与后台任务 runner 共用，后台任务走 runBatch({threadId}) 才不会踩坏 checkpoint 基线；④ 工具失败透出走 per-run `erroredToolCalls` Set → SSE `tool_result.isError` + 持久化 `messages.is_error`。
+  - 生产库手动 DDL（synchronize=false）：
+    ```sql
+    ALTER TABLE messages ADD COLUMN is_error tinyint(1) NOT NULL DEFAULT 0;
+    CREATE TABLE background_tasks (
+      id char(36) NOT NULL PRIMARY KEY,
+      conversation_id char(36) NOT NULL,
+      agent_config_id char(36) NOT NULL,
+      status enum('pending','running','done','failed') NOT NULL DEFAULT 'pending',
+      input text NOT NULL,
+      result_message_id char(36) NULL,
+      created_at datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+      updated_at datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+      finished_at datetime(6) NULL,
+      KEY idx_bg_conv_status (conversation_id, status),
+      CONSTRAINT fk_bg_conv FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ```
 
 ## 可执行命令
 
