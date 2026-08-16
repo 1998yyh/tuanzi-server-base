@@ -10,11 +10,30 @@ const viewportSchema = z.object({ x: z.number(), y: z.number(), k: z.number() })
 const nodeTypeSchema = z.enum(['image', 'text', 'config', 'video', 'audio', 'group']);
 const generationModeSchema = z.enum(['text', 'image', 'video', 'audio']);
 
+/**
+ * update_node.patch 白名单：只允许修改基础字段。
+ * .strict() 拒绝 id/type 等未知键——节点身份与类型不可经 patch 改写
+ * （applyCanvasOps 合并处还会 double-check 排除这两个键）。
+ */
+const nodePatchSchema = z
+  .object({
+    title: z.string().optional(),
+    position: z.object({ x: z.number().finite(), y: z.number().finite() }).optional(),
+    width: z.number().min(1).optional(),
+    height: z.number().min(1).optional(),
+    metadata: recordSchema.optional(),
+  })
+  .strict();
+
 export const canvasOpSchema = z.discriminatedUnion('type', [
   z.looseObject({
     type: z.literal('add_node'),
     nodeType: nodeTypeSchema.optional(),
-    id: z.string().optional(),
+    // id 可选：提供时必须是合法节点 id（字母/数字/-/_，1~64 位），省略则由服务端生成
+    id: z
+      .string()
+      .regex(/^[0-9a-zA-Z_-]{1,64}$/)
+      .optional(),
     title: z.string().optional(),
     x: z.number().optional(),
     y: z.number().optional(),
@@ -26,13 +45,15 @@ export const canvasOpSchema = z.discriminatedUnion('type', [
   z.looseObject({
     type: z.literal('update_node'),
     id: z.string(),
-    patch: recordSchema.optional(),
+    patch: nodePatchSchema.optional(),
     metadata: recordSchema.optional(),
   }),
   z.looseObject({
     type: z.literal('delete_node'),
     id: z.string().optional(),
     ids: z.array(z.string()).optional(),
+    // 与 applyCanvasOps 实现一致：未给 id/ids 时按节点类型批量删除
+    nodeType: nodeTypeSchema.optional(),
   }),
   z.looseObject({
     type: z.literal('delete_connections'),
@@ -56,4 +77,4 @@ export const canvasOpSchema = z.discriminatedUnion('type', [
   }),
 ]);
 
-export const canvasOpsArraySchema = z.array(canvasOpSchema).min(1);
+export const canvasOpsArraySchema = z.array(canvasOpSchema).min(1).max(500);

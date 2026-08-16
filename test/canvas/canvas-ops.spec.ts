@@ -31,6 +31,36 @@ describe('applyCanvasOps', () => {
     expect(result.touchedNodeIds).toHaveLength(2);
   });
 
+  it('add_node：op.id 与现有节点重复时回退为随机 id，不覆盖原节点', () => {
+    const base = doc({ nodes: [textNode('dup')] });
+    const result = applyCanvasOps(base, [
+      { type: 'add_node', id: 'dup', nodeType: 'text' },
+      { type: 'add_node', id: 'dup', nodeType: 'text' },
+    ]);
+    expect(result.document.nodes).toHaveLength(3);
+    expect(result.document.nodes[0].id).toBe('dup');
+    // 原节点内容未被覆盖，新增节点 id 全部唯一且为随机 uuid
+    expect(result.document.nodes[0].title).toBe('文本');
+    expect(new Set(result.document.nodes.map((n) => n.id)).size).toBe(3);
+    expect(result.document.nodes[1].id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(result.document.nodes[2].id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('update_node：patch 即使带 id/type 也不能覆写（double-check）', () => {
+    const base = doc({ nodes: [{ ...textNode('n1'), type: CanvasNodeType.Image }] });
+    const result = applyCanvasOps(base, [
+      {
+        type: 'update_node',
+        id: 'n1',
+        patch: { id: 'hacked', type: 'video', title: '改了' },
+      },
+    ]);
+    expect(result.document.nodes).toHaveLength(1);
+    expect(result.document.nodes[0].id).toBe('n1');
+    expect(result.document.nodes[0].type).toBe(CanvasNodeType.Image);
+    expect(result.document.nodes[0].title).toBe('改了');
+  });
+
   it('update_node：合并 patch 与 metadata；节点不存在时报中文错误', () => {
     const base = doc({ nodes: [{ ...textNode('n1'), metadata: { prompt: '旧' } }] });
     const result = applyCanvasOps(base, [

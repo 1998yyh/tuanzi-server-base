@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
   IsArray,
   IsInt,
   IsObject,
@@ -61,12 +62,14 @@ class CanvasConnectionDto {
 export class CanvasDocumentDto {
   @ApiProperty({ type: [CanvasNodeDto], description: '节点列表' })
   @IsArray()
+  @ArrayMaxSize(1000)
   @ValidateNested({ each: true })
   @Type(() => CanvasNodeDto)
   nodes: CanvasNodeDto[];
 
   @ApiProperty({ type: [CanvasConnectionDto], description: '连线列表' })
   @IsArray()
+  @ArrayMaxSize(1000)
   @ValidateNested({ each: true })
   @Type(() => CanvasConnectionDto)
   connections: CanvasConnectionDto[];
@@ -104,6 +107,7 @@ export class ApplyOpsDto {
     items: { type: 'object' },
   })
   @IsArray()
+  @ArrayMaxSize(500)
   ops: Record<string, unknown>[];
 
   @ApiProperty({ required: false, example: 3, description: '基于的版本号（可选，不传则不校验）' })

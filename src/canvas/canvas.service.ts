@@ -41,6 +41,10 @@ export class CanvasService {
   }> {
     const qb = this.projectRepo
       .createQueryBuilder('p')
+      // 列表不加载 document 大字段，摘要计数用 JSON_LENGTH 在 SQL 侧算好
+      .select(['p.id', 'p.name', 'p.version', 'p.createdAt', 'p.updatedAt'])
+      .addSelect("JSON_LENGTH(p.document, '$.nodes')", 'nodeCount')
+      .addSelect("JSON_LENGTH(p.document, '$.connections')", 'connectionCount')
       .where('p.user_id = :userId', { userId: user.id })
       .orderBy('p.updatedAt', 'DESC')
       .skip((query.page - 1) * query.limit)
@@ -48,9 +52,10 @@ export class CanvasService {
     if (query.keyword) {
       qb.andWhere('p.name LIKE :keyword', { keyword: `%${query.keyword}%` });
     }
-    const [items, total] = await qb.getManyAndCount();
+    const { entities, raw } = await qb.getRawAndEntities();
+    const total = await qb.getCount();
     return {
-      items: items.map((p) => this.toSummary(p)),
+      items: entities.map((p, index) => this.toSummary(p, raw[index])),
       total,
       page: query.page,
       limit: query.limit,
@@ -65,16 +70,27 @@ export class CanvasService {
 
   /** 仅取版本号（前端静默比对用，避免整文档传输） */
   async findVersion(user: CurrentUser, id: string): Promise<{ version: number }> {
-    const project = await this.findOwned(id, user.id);
+    const project = await this.projectRepo.findOne({
+      where: { id, userId: user.id },
+      select: ['version'],
+    });
+    if (!project) {
+      throw new NotFoundException(`画布 #${id} 不存在`);
+    }
     return { version: project.version };
   }
 
-  /** 重命名 */
+  /** 重命名：只更新 name 列（userId 条件天然防越权），不读回 document，避免并发下旧文档覆盖他人写入并回滚 version */
   async rename(user: CurrentUser, id: string, name: string): Promise<CanvasProjectView> {
     const project = await this.findOwned(id, user.id);
-    project.name = name;
-    const saved = await this.projectRepo.save(project);
-    return this.toView(saved);
+    const updateResult = await this.projectRepo.update(
+      { id: project.id, userId: user.id },
+      { name },
+    );
+    if (!updateResult.affected) {
+      throw new NotFoundException(`画布 #${id} 不存在`);
+    }
+    return this.toView({ ...project, name });
   }
 
   /**
@@ -126,14 +142,20 @@ export class CanvasService {
     return view;
   }
 
-  private toSummary(project: CanvasProject): CanvasProjectSummary {
+  private toSummary(
+    project: CanvasProject,
+    counts?: { nodeCount?: number | null; connectionCount?: number | null },
+  ): CanvasProjectSummary {
     const { user: _user, document, ...rest } = project;
     void _user;
     const doc = document as CanvasDocument | undefined;
+    // findAll 走 SQL 侧 JSON_LENGTH 计数（raw 行）；无 counts 时回退文档数组长度
+    const nodeCount = counts?.nodeCount ?? doc?.nodes?.length ?? 0;
+    const connectionCount = counts?.connectionCount ?? doc?.connections?.length ?? 0;
     return {
       ...rest,
-      nodeCount: doc?.nodes?.length ?? 0,
-      connectionCount: doc?.connections?.length ?? 0,
+      nodeCount: Number(nodeCount) || 0,
+      connectionCount: Number(connectionCount) || 0,
     };
   }
 }

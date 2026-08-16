@@ -115,11 +115,93 @@ describe('CanvasService', () => {
   });
 
   describe('rename', () => {
-    it('重命名并返回视图', async () => {
+    it('只调用 update（不调 save），只更新 name 列，返回改名后的视图', async () => {
       repo.findOne.mockResolvedValue({ ...project });
       const result = await service.rename(user as never, 'proj-1', '改名了');
-      expect(repo.save).toHaveBeenCalledWith(expect.objectContaining({ name: '改名了' }));
+      expect(repo.update).toHaveBeenCalledWith(
+        { id: 'proj-1', userId: 'user-1' },
+        { name: '改名了' },
+      );
+      expect(repo.save).not.toHaveBeenCalled();
       expect(result.name).toBe('改名了');
+      expect(result.version).toBe(1);
+      expect(result.document).toEqual(EMPTY_CANVAS_DOCUMENT);
+    });
+
+    it('update 影响 0 行（并发删除）抛 NotFoundException', async () => {
+      repo.findOne.mockResolvedValue({ ...project });
+      repo.update.mockResolvedValue({ affected: 0, raw: {}, generatedMaps: [] });
+      await expect(service.rename(user as never, 'proj-1', '改名了')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('findVersion', () => {
+    it('只 select version 列，返回 { version }', async () => {
+      repo.findOne.mockResolvedValue({ version: 3 } as CanvasProject);
+      const result = await service.findVersion(user as never, 'proj-1');
+      expect(repo.findOne).toHaveBeenCalledWith({
+        where: { id: 'proj-1', userId: 'user-1' },
+        select: ['version'],
+      });
+      expect(result).toEqual({ version: 3 });
+    });
+
+    it('不存在（含他人画布）抛 NotFoundException', async () => {
+      repo.findOne.mockResolvedValue(null);
+      await expect(service.findVersion(user as never, 'proj-1')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('findAll', () => {
+    it('select 排除 document，摘要计数取 SQL 侧 JSON_LENGTH', async () => {
+      const qb = {
+        select: jest.fn().mockReturnThis(),
+        addSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getRawAndEntities: jest.fn().mockResolvedValue({
+          entities: [
+            {
+              id: 'proj-1',
+              name: '我的画布',
+              version: 3,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+          ],
+          raw: [{ nodeCount: 2, connectionCount: 1 }],
+        }),
+        getCount: jest.fn().mockResolvedValue(1),
+      };
+      repo.createQueryBuilder.mockReturnValue(qb as never);
+
+      const result = await service.findAll(user as never, { page: 1, limit: 20 });
+
+      expect(qb.select).toHaveBeenCalledWith([
+        'p.id',
+        'p.name',
+        'p.version',
+        'p.createdAt',
+        'p.updatedAt',
+      ]);
+      expect(qb.addSelect).toHaveBeenCalledWith("JSON_LENGTH(p.document, '$.nodes')", 'nodeCount');
+      expect(qb.addSelect).toHaveBeenCalledWith(
+        "JSON_LENGTH(p.document, '$.connections')",
+        'connectionCount',
+      );
+      expect(result.items[0]).toMatchObject({
+        id: 'proj-1',
+        name: '我的画布',
+        nodeCount: 2,
+        connectionCount: 1,
+      });
+      expect(result.items[0]).not.toHaveProperty('document');
+      expect(result).toMatchObject({ total: 1, page: 1, limit: 20, totalPages: 1 });
     });
   });
 });

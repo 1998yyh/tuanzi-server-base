@@ -39,7 +39,14 @@ export class CanvasDocumentService {
       throw new ConflictException('画布已被其他操作修改，请刷新后重试');
     }
 
-    const { document, result } = mutator(project.document ?? { nodes: [], connections: [] });
+    const previousDocument = project.document ?? { nodes: [], connections: [] };
+    const { document, result } = mutator(previousDocument);
+
+    // 无变更短路：mutator 结果与当前文档 JSON 一致时跳过 UPDATE（version 不变），
+    // 避免「空 patch」类写入（如回填已存在的内容）无谓递增版本号、引发前端 409
+    if (JSON.stringify(document) === JSON.stringify(previousDocument)) {
+      return { document: previousDocument, version: project.version, result };
+    }
 
     const updateResult = await this.projectRepo.update(
       { id: projectId, version: project.version },

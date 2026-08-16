@@ -102,8 +102,10 @@ export function applyCanvasOps(document: CanvasDocument, ops: CanvasAgentOp[]): 
       const nodeType =
         op.nodeType && isBuiltinNodeType(op.nodeType) ? op.nodeType : CanvasNodeType.Text;
       const spec = getNodeSpec(nodeType);
+      // op.id 若与现有节点（含本批已建）重复，回退为随机 id，保证文档内 id 唯一且不覆盖他人节点
+      const nodeId = op.id && !nodes.some((node) => node.id === op.id) ? op.id : randomUUID();
       const node: CanvasNodeData = {
-        id: op.id || randomUUID(),
+        id: nodeId,
         type: nodeType,
         title: op.title || spec.title,
         position: op.position || { x: op.x ?? index * 36, y: op.y ?? index * 36 },
@@ -119,11 +121,15 @@ export function applyCanvasOps(document: CanvasDocument, ops: CanvasAgentOp[]): 
       if (!nodes.some((node) => node.id === op.id)) {
         throw new Error(`节点 #${op.id} 不存在`);
       }
+      // 防御：patch 即使绕过白名单也绝不能覆写 id/type（double-check）
+      const { id: _patchId, type: _patchType, ...safePatch } = op.patch ?? {};
+      void _patchId;
+      void _patchType;
       nodes = nodes.map((node) =>
         node.id === op.id
           ? {
               ...node,
-              ...op.patch,
+              ...safePatch,
               metadata: { ...node.metadata, ...op.patch?.metadata, ...op.metadata },
             }
           : node,
