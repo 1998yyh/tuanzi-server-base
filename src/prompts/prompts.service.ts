@@ -62,6 +62,12 @@ type SourceCache = PromptSourceStatus & {
 
 const CACHE_TTL_MS = 1000 * 60 * 60;
 const FETCH_TIMEOUT_MS = 30_000;
+/** 失败退避窗口：距上次失败不足该时长时不触发重新抓取（连续失败不再每请求一抓） */
+const FETCH_BACKOFF_MS = 5 * 60 * 1000;
+/** refreshAllSources 单批并发数（串行批次，避免一次性打满全部源） */
+const REFRESH_BATCH_SIZE = 4;
+/** 单个用户自建提示词源上限 */
+const MAX_USER_SOURCES = 50;
 
 /**
  * 提示词库：源配置落库，内容走 HTTP 抓取 + 进程内 1h SWR 缓存。
@@ -72,6 +78,11 @@ export class PromptsService implements OnApplicationBootstrap {
   private readonly logger = new Logger(PromptsService.name);
   private readonly cache = new Map<string, SourceCache>();
   private readonly loadingSources = new Map<string, Promise<PromptSourceRefreshResult>>();
+  /**
+   * 失败退避记忆（sourceId → 最近一次失败时间戳，进程内）。
+   * 多实例局限：各实例各自记忆，重启后清空——与内容缓存同生命周期，可接受。
+   */
+  private readonly lastFailedAt = new Map<string, number>();
 
   constructor(
     @InjectRepository(PromptSource)
@@ -114,6 +125,10 @@ export class PromptsService implements OnApplicationBootstrap {
   }
 
   async createSource(user: CurrentUser, dto: CreatePromptSourceDto): Promise<PromptSourceView> {
+    const count = await this.sourceRepo.count({ where: { userId: user.id } });
+    if (count >= MAX_USER_SOURCES) {
+      throw new BadRequestException(`自建提示词源最多 ${MAX_USER_SOURCES} 个`);
+    }
     const source = await this.sourceRepo.save(
       this.sourceRepo.create({
         userId: user.id,
@@ -135,8 +150,13 @@ export class PromptsService implements OnApplicationBootstrap {
   ): Promise<PromptSourceView> {
     const source = await this.findEditableSource(user, id);
     if (source.isBuiltin) {
-      // 内置源只允许切换启用状态（名称/地址保持预置）
-      if (dto.name !== undefined || dto.url !== undefined || dto.homepage !== undefined) {
+      // 内置源只允许切换启用状态（名称/地址/排序保持预置）
+      if (
+        dto.name !== undefined ||
+        dto.url !== undefined ||
+        dto.homepage !== undefined ||
+        dto.sortOrder !== undefined
+      ) {
         throw new BadRequestException('内置提示词源只能切换启用状态');
       }
     }
@@ -149,6 +169,8 @@ export class PromptsService implements OnApplicationBootstrap {
     });
     const saved = await this.sourceRepo.save(source);
     this.cache.delete(id);
+    // 配置变更后重置失败退避，允许立即重新抓取
+    this.lastFailedAt.delete(id);
     return this.toView(saved);
   }
 
@@ -157,6 +179,7 @@ export class PromptsService implements OnApplicationBootstrap {
     if (source.isBuiltin) throw new BadRequestException('内置提示词源不能删除');
     await this.sourceRepo.remove(source);
     this.cache.delete(id);
+    this.lastFailedAt.delete(id);
   }
 
   /** 校验源存在且对当前用户可见（内置共享 / 自建私有）后返回 */
@@ -210,7 +233,12 @@ export class PromptsService implements OnApplicationBootstrap {
 
   async refreshAllSources(user: CurrentUser): Promise<PromptSourceRefreshSummary> {
     const sources = await this.enabledSources(user);
-    const results = await Promise.all(sources.map((s) => this.getOrStartRefresh(s)));
+    // 分批并发（每批 4 个、串行批次），避免全量 Promise.all 一次性打满所有源
+    const results: PromptSourceRefreshResult[] = [];
+    for (let index = 0; index < sources.length; index += REFRESH_BATCH_SIZE) {
+      const batch = sources.slice(index, index + REFRESH_BATCH_SIZE);
+      results.push(...(await Promise.all(batch.map((s) => this.getOrStartRefresh(s)))));
+    }
     return summarizeRefresh(results);
   }
 
@@ -249,15 +277,25 @@ export class PromptsService implements OnApplicationBootstrap {
   private async getSourcePrompts(source: PromptSource): Promise<Prompt[]> {
     const cached = this.cache.get(source.id);
     if (cached) {
-      const stale =
-        cached.signature !== sourceSignature(source) ||
-        Date.now() - cached.fetchedAt >= CACHE_TTL_MS;
-      if (stale) void this.getOrStartRefresh(source).catch(() => undefined);
+      if (this.isSourceStale(cached, source)) {
+        void this.getOrStartRefresh(source).catch(() => undefined);
+      }
       return cached.items;
     }
     const result = await this.getOrStartRefresh(source);
     if (!result.success) throw new BadRequestException(result.lastError);
     return this.cache.get(source.id)?.items || [];
+  }
+
+  /**
+   * 缓存是否过期：签名变化 / 距上次成功超过 CACHE_TTL_MS；
+   * 距上次失败不足 FETCH_BACKOFF_MS 时处于退避期，即使超 TTL 也不触发重新抓取。
+   */
+  private isSourceStale(cached: SourceCache, source: PromptSource): boolean {
+    if (cached.signature !== sourceSignature(source)) return true;
+    const lastFailedAt = this.lastFailedAt.get(source.id) ?? 0;
+    if (lastFailedAt > 0 && Date.now() - lastFailedAt < FETCH_BACKOFF_MS) return false;
+    return Date.now() - cached.fetchedAt >= CACHE_TTL_MS;
   }
 
   private async getAllPrompts(sources: PromptSource[]): Promise<Prompt[]> {
@@ -291,6 +329,7 @@ export class PromptsService implements OnApplicationBootstrap {
         await runPromptSource(source, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }),
       );
       const lastSuccessAt = new Date().toISOString();
+      this.lastFailedAt.delete(source.id);
       this.cache.set(source.id, {
         sourceId: source.id,
         items,
@@ -309,7 +348,10 @@ export class PromptsService implements OnApplicationBootstrap {
         success: true,
       };
     } catch (error) {
+      // lastError 只写脱敏后的通用文案；原始细节（含状态码/DNS/TLS）挂在 error.cause 上记日志
       const lastError = error instanceof Error ? error.message : String(error);
+      const detail = error instanceof Error ? (error.cause ?? error.message) : String(error);
+      this.lastFailedAt.set(source.id, Date.now());
       this.cache.set(source.id, {
         sourceId: source.id,
         items: previous?.items || [],
@@ -319,7 +361,7 @@ export class PromptsService implements OnApplicationBootstrap {
         lastError,
         signature: previous?.signature || sourceSignature(source),
       });
-      this.logger.warn(`提示词源「${source.name}」刷新失败：${lastError}`);
+      this.logger.warn(`提示词源「${source.name}」刷新失败：${detail}`);
       return {
         sourceId: source.id,
         sourceName: source.name,
