@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, OnModuleInit } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MediaModule } from '../media/media.module';
 import { CanvasModule } from '../canvas/canvas.module';
@@ -23,4 +23,16 @@ import { GenerationPollerService } from './generation-poller.service';
   providers: [AiChannelsService, GenerationService, GenerationPollerService, encryptionKeyProvider],
   exports: [AiChannelsService, GenerationService],
 })
-export class AiGenerationModule {}
+export class AiGenerationModule implements OnModuleInit {
+  /**
+   * 生产环境 fail-fast：PUBLIC_BASE_URL 缺省是 localhost，远端模型服务侧不可达，
+   * 参考音视频素材（videoReferenceUrls / audioReferenceUrls）会因此全部生成失败。
+   */
+  onModuleInit(): void {
+    if (process.env.NODE_ENV === 'production' && !process.env.PUBLIC_BASE_URL) {
+      throw new Error(
+        '生产环境必须配置 PUBLIC_BASE_URL（视频/音频参考素材需要公网可访问的绝对地址，不能使用 localhost 缺省值）',
+      );
+    }
+  }
+}

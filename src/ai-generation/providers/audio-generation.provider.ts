@@ -3,8 +3,11 @@
 // - axios → 全局 fetch；i18n → 中文错误硬编码；配置注入 ResolvedChannelConfig
 // - 返回二进制 buffer（调用方落盘），不再返回浏览器 Blob
 // - 自定义调用脚本（plugin）不在 v1 范围
+// 2026-08-15 代码审查：出站请求 SSRF 加固 + redirect manual + 流式 50MB 上限
+import { assertPublicUrl } from '../../common/utils/ssrf.util';
 import { ApiFormat } from '../entities/ai-channel.entity';
 import { ResolvedChannelConfig } from './image-generation.provider';
+import { MAX_AUDIO_DOWNLOAD_BYTES, readBodyLimited } from './stream-download.util';
 
 const REQUEST_TIMEOUT_MS = 120_000;
 
@@ -80,7 +83,8 @@ export async function generateAudio(
   const instructions = req.instructions?.trim();
 
   try {
-    const response = await fetch(buildAudioApiUrl(config.baseUrl, '/audio/speech'), {
+    const url = await assertPublicUrl(buildAudioApiUrl(config.baseUrl, '/audio/speech'));
+    const response = await fetch(url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -91,8 +95,12 @@ export async function generateAudio(
         speed: Number(normalizeAudioSpeed(req.speed)),
         ...(instructions ? { instructions } : {}),
       }),
+      redirect: 'manual',
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+      throw new Error('音频生成失败（响应重定向，已拒绝）');
+    }
     if (!response.ok) throw new Error(await readFetchError(response, '音频生成失败'));
     const contentType = response.headers.get('content-type')?.split(';')[0] || '';
     if (contentType.includes('json')) {
@@ -103,7 +111,16 @@ export async function generateAudio(
       };
       throw new Error(payload.error?.message || payload.msg || '音频生成失败');
     }
-    const buffer = Buffer.from(await response.arrayBuffer());
+    // Content-Length 预检 + 流式读取累计字节，超 50MB 中止（不无上限 arrayBuffer）
+    const contentLength = Number(response.headers.get('content-length') ?? 0);
+    if (contentLength > MAX_AUDIO_DOWNLOAD_BYTES) {
+      throw new Error('音频结果超过大小限制（50MB）');
+    }
+    const buffer = await readBodyLimited(
+      response,
+      MAX_AUDIO_DOWNLOAD_BYTES,
+      '音频结果超过大小限制（50MB）',
+    );
     return {
       buffer,
       mimeType: contentType.startsWith('audio/') ? contentType : audioMimeType(format),

@@ -4,8 +4,13 @@
 // - 浏览器轮询循环拆为 create/poll 两步（服务端 generation-poller 定时驱动）
 // - 参考素材由调用方预组装：图片给 dataUrl，音视频给可公网访问的绝对 URL
 // - 自定义调用脚本（plugin provider）不在 v1 范围
+// 2026-08-15 代码审查：下载路径 SSRF 加固 + 流式大小上限；参考素材超限显式校验；
+// pollOpenAiVideoTask 终态识别放宽（succeeded/success/done）
+import { BadRequestException } from '@nestjs/common';
+import { assertPublicUrl } from '../../common/utils/ssrf.util';
 import { ApiFormat } from '../entities/ai-channel.entity';
 import { ResolvedChannelConfig } from './image-generation.provider';
+import { MAX_VIDEO_DOWNLOAD_BYTES, readBodyLimited } from './stream-download.util';
 import {
   boolConfig,
   buildSeedancePromptText,
@@ -19,6 +24,9 @@ import {
 const CREATE_TIMEOUT_MS = 120_000;
 const POLL_TIMEOUT_MS = 60_000;
 const DOWNLOAD_TIMEOUT_MS = 180_000;
+
+/** OpenAI 兼容视频接口的参考图片上限 */
+const OPENAI_MAX_IMAGE_REFERENCES = 7;
 
 export type VideoProviderKind = 'openai' | 'seedance';
 
@@ -127,11 +135,17 @@ export async function downloadVideoContent(
   config: ResolvedChannelConfig,
   ref: VideoTaskRef,
 ): Promise<{ buffer: Buffer; mimeType: string }> {
-  const url = `${buildVideoApiUrl(config.baseUrl, `/videos/${encodeURIComponent(ref.remoteTaskId)}`)}/content`;
+  const url = await assertPublicUrl(
+    `${buildVideoApiUrl(config.baseUrl, `/videos/${encodeURIComponent(ref.remoteTaskId)}`)}/content`,
+  );
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${config.apiKey}` },
+    redirect: 'manual',
     signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
   });
+  if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+    throw new Error('视频结果下载失败（响应重定向，已拒绝）');
+  }
   if (!response.ok) throw new Error(await readFetchError(response, '视频结果下载失败'));
   const mimeType = response.headers.get('content-type')?.split(';')[0] || 'video/mp4';
   if (mimeType.includes('json')) {
@@ -142,7 +156,17 @@ export async function downloadVideoContent(
     };
     throw new Error(payload.error?.message || payload.msg || '视频结果下载失败');
   }
-  return { buffer: Buffer.from(await response.arrayBuffer()), mimeType };
+  // Content-Length 预检 + 流式读取累计字节，超 200MB 中止（不无上限 arrayBuffer）
+  const contentLength = Number(response.headers.get('content-length') ?? 0);
+  if (contentLength > MAX_VIDEO_DOWNLOAD_BYTES) {
+    throw new Error('视频结果超过大小限制（200MB）');
+  }
+  const buffer = await readBodyLimited(
+    response,
+    MAX_VIDEO_DOWNLOAD_BYTES,
+    '视频结果超过大小限制（200MB）',
+  );
+  return { buffer, mimeType };
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +195,11 @@ async function createOpenAiVideoTask(
   if (size) body.append('size', size);
   body.append('resolution_name', normalizeResolutionToken(req.vquality || ''));
   body.append('preset', 'normal');
-  (req.imageReferences || []).slice(0, 7).forEach((image) => {
+  const images = req.imageReferences || [];
+  if (images.length > OPENAI_MAX_IMAGE_REFERENCES) {
+    throw new BadRequestException(`参考图片最多 ${OPENAI_MAX_IMAGE_REFERENCES} 张`);
+  }
+  images.forEach((image) => {
     const buffer = Buffer.from(image.dataUrl.split(',')[1] || '', 'base64');
     body.append(
       'input_reference[]',
@@ -215,8 +243,14 @@ async function pollOpenAiVideoTask(
     const video = unwrapEnvelope((await response.json()) as ApiVideoResponse, '接口未返回视频任务');
     const url = videoResultUrl(video);
     if (url) return { status: 'succeeded', url };
-    if (video.status === 'completed') return { status: 'succeeded', url: null };
-    if (video.status === 'failed' || video.status === 'cancelled') {
+    const status = String(video.status || '').trim();
+    // 'completed'：OpenAI 生态终态，无直链时走 /videos/:id/content 端点带鉴权下载
+    if (status === 'completed') return { status: 'succeeded', url: null };
+    // 终态识别放宽：succeeded / success / done 等均为终态；无结果 URL 时对齐 Seedance 分支视为失败
+    if (/^suc(ceed|cess)/i.test(status) || /^done$/i.test(status) || /^success$/i.test(status)) {
+      return { status: 'failed', error: '任务完成但未返回视频地址' };
+    }
+    if (status === 'failed' || status === 'cancelled') {
       return {
         status: 'failed',
         error: readApiErrorMessage(video.error?.message) || '视频生成失败',
@@ -255,9 +289,19 @@ async function createSeedanceTask(
   config: ResolvedChannelConfig,
   req: GenerateVideoRequest,
 ): Promise<VideoTaskRef> {
-  const images = (req.imageReferences || []).slice(0, SEEDANCE_REFERENCE_LIMITS.images);
-  const videos = (req.videoReferenceUrls || []).slice(0, SEEDANCE_REFERENCE_LIMITS.videos);
-  const audios = (req.audioReferenceUrls || []).slice(0, SEEDANCE_REFERENCE_LIMITS.audios);
+  const images = req.imageReferences || [];
+  const videos = req.videoReferenceUrls || [];
+  const audios = req.audioReferenceUrls || [];
+  // 超限显式校验（原为 .slice 静默裁剪）：分别在各自分支按各自上限拦截
+  if (images.length > SEEDANCE_REFERENCE_LIMITS.images) {
+    throw new BadRequestException(`参考图片最多 ${SEEDANCE_REFERENCE_LIMITS.images} 张`);
+  }
+  if (videos.length > SEEDANCE_REFERENCE_LIMITS.videos) {
+    throw new BadRequestException(`参考视频最多 ${SEEDANCE_REFERENCE_LIMITS.videos} 个`);
+  }
+  if (audios.length > SEEDANCE_REFERENCE_LIMITS.audios) {
+    throw new BadRequestException(`参考音频最多 ${SEEDANCE_REFERENCE_LIMITS.audios} 个`);
+  }
   if (audios.length && !images.length && !videos.length) {
     throw new Error('参考音频需要搭配至少一个图片或视频参考素材');
   }

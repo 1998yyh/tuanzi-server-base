@@ -33,6 +33,7 @@ export interface GenerationNodeRef {
  */
 @Entity('generation_tasks')
 @Index(['userId', 'status'])
+@Index(['status', 'createdAt'])
 export class GenerationTask {
   @PrimaryGeneratedColumn('uuid')
   id: string;

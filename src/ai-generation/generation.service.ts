@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { readFile } from 'node:fs/promises';
+import { assertPublicUrl } from '../common/utils/ssrf.util';
 import { User } from '../users/users.entity';
 import { MediaFileView, MediaKind, MediaSource } from '../media/media-file.entity';
 import { MediaService } from '../media/media.service';
@@ -37,6 +38,11 @@ import {
 } from './providers/video-generation.provider';
 import { generateAudio } from './providers/audio-generation.provider';
 import {
+  MAX_IMAGE_DOWNLOAD_BYTES,
+  MAX_VIDEO_DOWNLOAD_BYTES,
+  readBodyLimited,
+} from './providers/stream-download.util';
+import {
   seedanceVideoReferenceError,
   SEEDANCE_REFERENCE_LIMITS,
 } from './providers/seedance-video.util';
@@ -45,8 +51,6 @@ type CurrentUser = Omit<User, 'password'>;
 
 const MODEL_REF_SEPARATOR = '::';
 const DOWNLOAD_TIMEOUT_MS = 120_000;
-const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024;
-const MAX_VIDEO_DOWNLOAD_BYTES = 200 * 1024 * 1024;
 
 /** 参考音视频素材的绝对 URL 前缀（远端模型服务需要可公网拉取的地址） */
 const PUBLIC_BASE_URL = (
@@ -349,22 +353,13 @@ export class GenerationService {
     }
   }
 
-  /** 从直链下载生成结果（带大小上限） */
+  /** 从直链下载生成结果（SSRF 校验 + redirect manual + 流式大小上限） */
   private async downloadResult(
     url: string,
     maxBytes: number,
     defaultMime: string,
   ): Promise<{ buffer: Buffer; mimeType: string }> {
-    const response = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
-    if (!response.ok) {
-      throw new Error(`下载生成结果失败（HTTP ${response.status}）`);
-    }
-    const contentLength = Number(response.headers.get('content-length') ?? 0);
-    if (contentLength > maxBytes) {
-      throw new Error(`生成结果超过大小限制（${Math.round(maxBytes / 1024 / 1024)}MB）`);
-    }
-    const mimeType = response.headers.get('content-type')?.split(';')[0] || defaultMime;
-    return { buffer: Buffer.from(await response.arrayBuffer()), mimeType };
+    return this.downloadToBuffer(url, maxBytes, defaultMime, '下载生成结果');
   }
 
   /** 视频参考素材：图片转 dataUrl，音视频转绝对 URL（Seedance 校验尺寸/数量） */
@@ -521,16 +516,41 @@ export class GenerationService {
     if (output.kind === 'b64') {
       return { buffer: Buffer.from(output.data, 'base64'), mimeType: 'image/png' };
     }
-    const response = await fetch(output.url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+    return this.downloadToBuffer(output.url, MAX_IMAGE_DOWNLOAD_BYTES, 'image/png', '下载生成结果');
+  }
+
+  /**
+   * 统一出站下载：SSRF 校验（assertPublicUrl）→ redirect: manual（重定向拒绝）
+   * → Content-Length 预检 + 流式读取累计字节，超限中止（不无上限 arrayBuffer）。
+   */
+  private async downloadToBuffer(
+    url: string,
+    maxBytes: number,
+    defaultMime: string,
+    label: string,
+  ): Promise<{ buffer: Buffer; mimeType: string }> {
+    const checkedUrl = await assertPublicUrl(url);
+    const response = await fetch(checkedUrl, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+    });
+    if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+      throw new Error(`${label}失败（响应重定向，已拒绝）`);
+    }
     if (!response.ok) {
-      throw new Error(`下载生成结果失败（HTTP ${response.status}）`);
+      throw new Error(`${label}失败（HTTP ${response.status}）`);
     }
     const contentLength = Number(response.headers.get('content-length') ?? 0);
-    if (contentLength > MAX_DOWNLOAD_BYTES) {
-      throw new Error('生成结果超过大小限制（50MB）');
+    if (contentLength > maxBytes) {
+      throw new Error(`${label}超过大小限制（${Math.round(maxBytes / 1024 / 1024)}MB）`);
     }
-    const mimeType = response.headers.get('content-type')?.split(';')[0] || 'image/png';
-    return { buffer: Buffer.from(await response.arrayBuffer()), mimeType };
+    const mimeType = response.headers.get('content-type')?.split(';')[0] || defaultMime;
+    const buffer = await readBodyLimited(
+      response,
+      maxBytes,
+      `${label}超过大小限制（${Math.round(maxBytes / 1024 / 1024)}MB）`,
+    );
+    return { buffer, mimeType };
   }
 
   toTaskView(task: GenerationTask): GenerationTaskView {
