@@ -1,9 +1,17 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { QueryFailedError, Repository } from 'typeorm';
 import { DailyReportsService } from 'src/daily-reports/daily-reports.service';
 import { DailyReport, DailyReportType } from 'src/daily-reports/daily-reports.entity';
 import { NotFoundException, ConflictException } from '@nestjs/common';
+
+/** 构造 MySQL 唯一索引冲突（errno 1062 / ER_DUP_ENTRY）的 QueryFailedError */
+function dupEntryError(
+  extra: { errno?: number; code?: string } = { errno: 1062, code: 'ER_DUP_ENTRY' },
+): QueryFailedError {
+  const driverError = Object.assign(new Error('Duplicate entry'), extra);
+  return new QueryFailedError('INSERT INTO `daily_reports` ...', [], driverError);
+}
 
 describe('DailyReportsService', () => {
   let service: DailyReportsService;
@@ -72,6 +80,32 @@ describe('DailyReportsService', () => {
       await expect(service.create(createDto)).rejects.toThrow(ConflictException);
       await expect(service.create(createDto)).rejects.toThrow('2026-03-16 该类型的日报已存在');
       expect(repository.save).not.toHaveBeenCalled();
+    });
+
+    it('并发竞态下 save 撞唯一索引（errno 1062）时转 ConflictException', async () => {
+      repository.findOne.mockResolvedValue(null);
+      repository.create.mockReturnValue(mockReport);
+      repository.save.mockRejectedValue(dupEntryError());
+
+      await expect(service.create(createDto)).rejects.toThrow(ConflictException);
+      await expect(service.create(createDto)).rejects.toThrow('2026-03-16 该类型的日报已存在');
+    });
+
+    it('save 抛 ER_DUP_ENTRY code（无 errno）时同样转 ConflictException', async () => {
+      repository.findOne.mockResolvedValue(null);
+      repository.create.mockReturnValue(mockReport);
+      repository.save.mockRejectedValue(dupEntryError({ code: 'ER_DUP_ENTRY' }));
+
+      await expect(service.create(createDto)).rejects.toThrow(ConflictException);
+      await expect(service.create(createDto)).rejects.toThrow('2026-03-16 该类型的日报已存在');
+    });
+
+    it('save 抛其他数据库错误时原样上抛，不吞错', async () => {
+      repository.findOne.mockResolvedValue(null);
+      repository.create.mockReturnValue(mockReport);
+      repository.save.mockRejectedValue(new Error('connection lost'));
+
+      await expect(service.create(createDto)).rejects.toThrow('connection lost');
     });
   });
 
@@ -218,6 +252,25 @@ describe('DailyReportsService', () => {
 
       expect(result.title).toBe('新标题');
     });
+
+    it('update 改 type/date 撞唯一索引时转 ConflictException', async () => {
+      repository.findOne.mockResolvedValue({ ...mockReport });
+      repository.save.mockRejectedValue(dupEntryError());
+
+      await expect(service.update('test-uuid', { date: '2026-03-17' })).rejects.toThrow(
+        ConflictException,
+      );
+      await expect(service.update('test-uuid', { date: '2026-03-17' })).rejects.toThrow(
+        '2026-03-17 该类型的日报已存在',
+      );
+    });
+
+    it('save 抛其他错误时原样上抛', async () => {
+      repository.findOne.mockResolvedValue({ ...mockReport });
+      repository.save.mockRejectedValue(new Error('connection lost'));
+
+      await expect(service.update('test-uuid', { title: 'x' })).rejects.toThrow('connection lost');
+    });
   });
 
   describe('remove', () => {
@@ -267,6 +320,15 @@ describe('DailyReportsService', () => {
 
       expect(repository.create).toHaveBeenCalledWith(upsertDto);
       expect(result).toEqual(mockReport);
+    });
+
+    it('新建时并发竞态撞唯一索引转 ConflictException', async () => {
+      repository.findOne.mockResolvedValue(null);
+      repository.create.mockReturnValue(mockReport);
+      repository.save.mockRejectedValue(dupEntryError());
+
+      await expect(service.upsert(upsertDto)).rejects.toThrow(ConflictException);
+      await expect(service.upsert(upsertDto)).rejects.toThrow('2026-03-16 该类型的日报已存在');
     });
   });
 });
