@@ -84,28 +84,44 @@ export class SkillsService implements OnApplicationBootstrap {
       ? await this.mcpServersService.validateForAssociation(dto.mcpServerIds, user)
       : [];
 
-    const saved = await this.skillRepo.save(
-      this.skillRepo.create({
-        name: dto.name,
-        description: dto.description,
-        systemPrompt: dto.systemPrompt,
-        inputSchema: dto.inputSchema ?? null,
-        enabledTools: dto.enabledTools ?? [],
-        isActive: true,
-        createdBy: user.id,
-        mcpServers,
-      }),
-    );
+    let saved: Skill;
+    try {
+      saved = await this.skillRepo.save(
+        this.skillRepo.create({
+          name: dto.name,
+          description: dto.description,
+          systemPrompt: dto.systemPrompt,
+          inputSchema: dto.inputSchema ?? null,
+          enabledTools: dto.enabledTools ?? [],
+          isActive: true,
+          createdBy: user.id,
+          mcpServers,
+        }),
+      );
+    } catch (e) {
+      // 先查重只是友好快速失败；并发下唯一索引才是最终防线（TOCTOU）
+      if (this.isDuplicateNameError(e)) {
+        throw new ConflictException(`Skill 名称 "${dto.name}" 已存在`);
+      }
+      throw e;
+    }
     return this.toView(await this.reloadWithRelations(saved.id));
   }
 
   async findAllActive(): Promise<{ items: SkillView[]; total: number }> {
     const [items, total] = await this.skillRepo.findAndCount({
       where: { isActive: true },
-      relations: ['mcpServers'],
       order: { createdAt: 'DESC' },
     });
-    return { items: items.map((s) => this.toView(s)), total };
+    // 性能：不再加载 mcpServers 完整实体（含 env/headers 密文列），只回查关联 id
+    const mcpServerIdsBySkill = await this.loadMcpServerIdsBySkill(items.map((s) => s.id));
+    return {
+      items: items.map((s) => ({
+        ...this.toView(s),
+        mcpServerIds: mcpServerIdsBySkill.get(s.id) ?? [],
+      })),
+      total,
+    };
   }
 
   async update(user: CurrentUser, id: string, dto: UpdateSkillDto): Promise<SkillView> {
@@ -131,7 +147,15 @@ export class SkillsService implements OnApplicationBootstrap {
         : [];
     }
 
-    await this.skillRepo.save(skill);
+    try {
+      await this.skillRepo.save(skill);
+    } catch (e) {
+      // 改名并发撞唯一索引时转 409（先查重只是快速失败，DB 唯一索引是最终防线）
+      if (this.isDuplicateNameError(e)) {
+        throw new ConflictException(`Skill 名称 "${skill.name}" 已存在`);
+      }
+      throw e;
+    }
     return this.toView(await this.reloadWithRelations(id));
   }
 
@@ -204,6 +228,17 @@ export class SkillsService implements OnApplicationBootstrap {
     return skill;
   }
 
+  /** 只回查 skill_mcp_servers 关联的 server id（不加载完整实体，避免密文列传输） */
+  private async loadMcpServerIdsBySkill(skillIds: string[]): Promise<Map<string, string[]>> {
+    if (!skillIds.length) return new Map();
+    const skills = await this.skillRepo.find({
+      where: { id: In(skillIds) },
+      relations: { mcpServers: true },
+      select: { id: true, mcpServers: { id: true } },
+    });
+    return new Map(skills.map((s) => [s.id, (s.mcpServers ?? []).map((m) => m.id)]));
+  }
+
   private async findOrFail(id: string): Promise<Skill> {
     const skill = await this.skillRepo.findOne({ where: { id }, relations: ['mcpServers'] });
     if (!skill) {
@@ -230,5 +265,15 @@ export class SkillsService implements OnApplicationBootstrap {
     if (skill.createdBy !== user.id && user.role !== UserRole.ADMIN) {
       throw new ForbiddenException('只有创建者或管理员可以操作该 Skill');
     }
+  }
+
+  /** MySQL 唯一索引冲突（name 唯一）识别：兼容 driverError 与直接 errno 两种形状 */
+  private isDuplicateNameError(e: unknown): boolean {
+    const err = e as { driverError?: { errno?: number; code?: string }; errno?: number };
+    return (
+      err?.driverError?.errno === 1062 ||
+      err?.driverError?.code === 'ER_DUP_ENTRY' ||
+      err?.errno === 1062
+    );
   }
 }
