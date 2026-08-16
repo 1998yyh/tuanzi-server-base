@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Controller,
   Get,
+  NotFoundException,
   Param,
   ParseUUIDPipe,
   Post,
@@ -43,8 +44,15 @@ export class MediaController {
   @ApiOperation({ summary: '媒体文件元数据' })
   @ApiResponse({ status: 200, description: '获取成功' })
   @ApiResponse({ status: 404, description: '媒体文件不存在' })
-  async findOne(@Param('id', ParseUUIDPipe) id: string) {
+  async findOne(
+    @CurrentUser() user: Omit<User, 'password'>,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     const media = await this.mediaService.findById(id);
+    // 归属校验：他人媒体一律 404，不泄露存在性（2026-08-15 代码审查）
+    if (media.userId !== user.id) {
+      throw new NotFoundException(`媒体文件 #${id} 不存在`);
+    }
     return this.mediaService.toView(media);
   }
 }

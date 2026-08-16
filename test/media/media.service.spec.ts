@@ -9,6 +9,7 @@ import { MediaFile, MediaKind, MediaSource } from 'src/media/media-file.entity';
 jest.mock('node:fs/promises', () => ({
   mkdir: jest.fn(async () => undefined),
   writeFile: jest.fn(async () => undefined),
+  unlink: jest.fn(async () => undefined),
   readFile: jest.fn(async () => Buffer.from('')),
 }));
 
@@ -21,6 +22,10 @@ const PNG_1PX = Buffer.from(
 describe('MediaService', () => {
   let service: MediaService;
   let repo: jest.Mocked<Repository<MediaFile>>;
+  const { unlink: mockUnlink, writeFile: mockWriteFile } = jest.requireMock('node:fs/promises') as {
+    unlink: jest.Mock;
+    writeFile: jest.Mock;
+  };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -37,7 +42,7 @@ describe('MediaService', () => {
               ...v,
             })),
             findOne: jest.fn(),
-            findByIds: jest.fn(),
+            find: jest.fn(),
           },
         },
       ],
@@ -77,6 +82,63 @@ describe('MediaService', () => {
       const saved = repo.save.mock.calls[0][0] as MediaFile;
       expect(saved.fileName).toMatch(/\.bin$/);
     });
+
+    it('应拒绝 SVG 图片（防存储型 XSS）', async () => {
+      await expect(
+        service.saveBuffer('user-1', Buffer.from('<svg onload="alert(1)"></svg>'), {
+          mimeType: 'image/svg+xml',
+          kind: MediaKind.IMAGE,
+          source: MediaSource.IMPORT,
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockWriteFile).not.toHaveBeenCalled();
+    });
+
+    it('图片内容无法被识别时应拒绝（mimetype 可伪造，内容必须真实）', async () => {
+      await expect(
+        service.saveBuffer('user-1', Buffer.from('<html><script>alert(1)</script></html>'), {
+          mimeType: 'image/jpeg',
+          kind: MediaKind.IMAGE,
+          source: MediaSource.IMPORT,
+        }),
+      ).rejects.toThrow('图片内容无效');
+      expect(mockWriteFile).not.toHaveBeenCalled();
+    });
+
+    it('声明的 MIME 不在映射表时，应按嗅探结果修正扩展名', async () => {
+      await service.saveBuffer('user-1', PNG_1PX, {
+        mimeType: 'image/x-unknown',
+        kind: MediaKind.IMAGE,
+        source: MediaSource.IMPORT,
+      });
+      const saved = repo.save.mock.calls[0][0] as MediaFile;
+      expect(saved.fileName).toMatch(/\.png$/);
+    });
+
+    it('数据库登记失败时应清理已写入的文件（避免孤儿文件）', async () => {
+      repo.save.mockRejectedValue(new Error('数据库连接断开'));
+      await expect(
+        service.saveBuffer('user-1', PNG_1PX, {
+          mimeType: 'image/png',
+          kind: MediaKind.IMAGE,
+          source: MediaSource.IMPORT,
+        }),
+      ).rejects.toThrow('数据库连接断开');
+      expect(mockUnlink).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('saveUpload', () => {
+    it('图片内容无法被识别时应拒绝并清理落盘文件', async () => {
+      const file = {
+        mimetype: 'image/png',
+        path: '/tmp/upload.png',
+        filename: 'uuid.png',
+        size: 123,
+      } as Express.Multer.File;
+      await expect(service.saveUpload('user-1', file)).rejects.toThrow('文件内容不是有效的图片');
+      expect(mockUnlink).toHaveBeenCalledWith('/tmp/upload.png');
+    });
   });
 
   describe('findById', () => {
@@ -91,23 +153,31 @@ describe('MediaService', () => {
     it('空数组直接返回，不查库', async () => {
       const result = await service.findByIdsForUser([], 'user-1');
       expect(result).toEqual([]);
-      expect(repo.findByIds).not.toHaveBeenCalled();
+      expect(repo.find).not.toHaveBeenCalled();
     });
 
     it('部分不存在时报错', async () => {
-      repo.findByIds.mockResolvedValue([{ id: 'a', userId: 'user-1' } as MediaFile]);
+      repo.find.mockResolvedValue([{ id: 'a', userId: 'user-1' } as MediaFile]);
       await expect(service.findByIdsForUser(['a', 'b'], 'user-1')).rejects.toThrow(
         '媒体文件 #b 不存在',
       );
     });
 
     it('包含他人文件时拒绝', async () => {
-      repo.findByIds.mockResolvedValue([
+      repo.find.mockResolvedValue([
         { id: 'a', userId: 'user-1' } as MediaFile,
         { id: 'b', userId: 'user-2' } as MediaFile,
       ]);
       await expect(service.findByIdsForUser(['a', 'b'], 'user-1')).rejects.toThrow(
         BadRequestException,
+      );
+    });
+
+    it('使用 In() 查询代替已废弃的 findByIds', async () => {
+      repo.find.mockResolvedValue([{ id: 'a', userId: 'user-1' } as MediaFile]);
+      await service.findByIdsForUser(['a'], 'user-1');
+      expect(repo.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: expect.anything() } }),
       );
     });
   });
