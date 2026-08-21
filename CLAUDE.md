@@ -72,6 +72,7 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 
 - API 前缀 `api`（`main.ts` 设置）；Swagger UI: `http://localhost:3000/api/docs`
 - 环境变量加载顺序：`.env.local` 优先于 `.env`（`app.module.ts` 的 `envFilePath`）
+- 部署：`bash deploy.sh`（同步源码 → 服务器重建 app → 健康检查）。**前置会自动跑 `scripts/check-prod-schema.sh`**：代码 `@Entity` 表清单 vs 生产库 `SHOW TABLES`，缺表直接拒绝部署并提示待执行的 `docs/plans/*.sql`——synchronize 关闭后新实体必须先手动执行 DDL 再发版。
 
 ## 核心架构：认证与请求链路
 

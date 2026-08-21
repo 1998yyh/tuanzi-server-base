@@ -8,7 +8,9 @@ ENV PATH=$PNPM_HOME:$PATH
 # 容器里没有 .git，husky 装钩子会报错，直接禁掉
 ENV HUSKY=0
 
-RUN corepack enable && corepack prepare pnpm@10.32.0 --activate
+# 服务器在腾讯云，用 npmmirror 源；lockfile 已剥掉内网 tarball URL，按此 registry 解析下载地址
+RUN corepack enable && corepack prepare pnpm@10.32.0 --activate \
+    && pnpm config set registry https://registry.npmmirror.com
 
 WORKDIR /app
 

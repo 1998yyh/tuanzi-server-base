@@ -10,6 +10,9 @@ COMPOSE="docker compose -f docker-compose.prod.yml"
 
 cd "$(dirname "$0")"
 
+echo "==> 部署前置检查：生产库表结构 vs 代码实体"
+bash scripts/check-prod-schema.sh
+
 echo "==> 同步源码 -> $SERVER:$REMOTE_DIR"
 rsync -avz --delete \
   --exclude '.git' \
