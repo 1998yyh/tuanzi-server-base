@@ -1,7 +1,7 @@
 name: benchmark-transfer
 
 # 临时基准测试：实测「CI 构建镜像 → docker save | ssh docker load 直传」耗时
-# 只手动触发；只 load 不重启容器，不影响现网。测完由正式 deploy workflow 取代。
+# 手动触发；只 load 不重启容器，不影响现网。测完由正式 deploy workflow 取代。
 on:
   workflow_dispatch:
 
