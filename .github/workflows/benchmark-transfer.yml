@@ -15,7 +15,7 @@ jobs:
         run: docker build -t tuanzi-server-base-app:benchmark .
 
       - name: Report image size
-        run: docker images tuanzi-server-base-app:benchmark --format 'image size: {{.Size}}'
+        run: docker images tuanzi-server-base-app
 
       - name: Set up SSH
         run: |
