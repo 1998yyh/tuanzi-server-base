@@ -85,7 +85,21 @@ export class ConversationsController {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+      // 禁 nginx proxy_buffering：不设此头时事件会被反向代理攒批，
+      // 前端观感是「卡住半天一股脑全来」而非逐条流式
+      res.setHeader('X-Accel-Buffering', 'no');
       res.flushHeaders();
+
+      // SSE 心跳：每 15s 一个注释帧（: 开头，客户端解析器自动忽略）。
+      // Agent 长思考/工具调用期间无任何字节流出，反向代理 proxy_read_timeout 会掐断静默连接
+      const heartbeat = setInterval(() => {
+        try {
+          res.write(': ping\n\n');
+        } catch {
+          // 连接已关闭，finally 统一清理定时器
+        }
+      }, 15000);
+      heartbeat.unref();
 
       // 客户端断开（close 事件）时中止底层 LangGraph 执行，
       // 避免断线后 LLM 调用 / 工具副作用仍在后台空跑
@@ -127,6 +141,7 @@ export class ConversationsController {
           }
         }
       } finally {
+        clearInterval(heartbeat);
         res.removeListener('close', onClose);
         res.end();
       }
