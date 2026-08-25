@@ -73,6 +73,7 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 - API 前缀 `api`（`main.ts` 设置）；Swagger UI: `http://localhost:3000/api/docs`
 - 环境变量加载顺序：`.env.local` 优先于 `.env`（`app.module.ts` 的 `envFilePath`）
 - 部署：`bash deploy.sh`（同步源码 → 服务器重建 app → 健康检查）。**前置会自动跑 `scripts/check-prod-schema.sh`**：代码 `@Entity` 表清单 vs 生产库 `SHOW TABLES`，缺表直接拒绝部署并提示待执行的 `docs/plans/*.sql`——synchronize 关闭后新实体必须先手动执行 DDL 再发版。
+- 生产日志：`bash scripts/logs.sh`（排障一条龙）——`--since 2h --level error --path ai-channels` 按时间窗/级别/接口路径过滤，默认 1h 内 WARN+ERROR；日志为 pino JSON（nestjs-pino 接管全部 NestJS 日志，authorization/cookie 永不落盘），服务器侧 jq 过滤。列级 schema 深度排查用 `scripts/schema-diff-prod.js`（用法见文件头注释）。
 
 ## 核心架构：认证与请求链路
 

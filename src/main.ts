@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import { Logger } from 'nestjs-pino';
 import { json, urlencoded } from 'express';
 import { join } from 'path';
 import { AppModule } from './app.module';
@@ -12,6 +13,10 @@ async function bootstrap() {
     // 画布文档是单列大 JSON，express 默认 100kb 会成为「无限画布」保存的隐性天花板
     bodyParser: false,
   });
+
+  // pino 接管全部 NestJS 内置日志（RouterExplorer / ExceptionsHandler / 业务 Logger），
+  // 生产输出 JSON 供 scripts/logs.sh 结构化过滤
+  app.useLogger(app.get(Logger));
 
   app.use(json({ limit: '5mb' }));
   app.use(urlencoded({ extended: true, limit: '5mb' }));

@@ -25,6 +25,13 @@ services:
     build: .
     container_name: tuanzi-app
     restart: unless-stopped
+    # JSON 结构化日志落盘轮转：单文件 10m × 3 个，防长期运行撑爆磁盘
+    # （compose 级配置只重建 app 容器，不动 daemon 避免波及 mysql）
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
     env_file: .env.production
     environment:
       # 连 compose 内部网络的服务名，别写 localhost
