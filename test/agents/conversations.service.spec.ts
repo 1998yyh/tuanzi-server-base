@@ -8,6 +8,7 @@ import { Conversation, ConversationStatus } from 'src/agents/entities/conversati
 import { Message, MessageRole } from 'src/agents/entities/message.entity';
 import { AgentExecutorService } from 'src/agents/agent-executor.service';
 import { TypeORMCheckpointer } from 'src/agents/checkpointers/typeorm.checkpointer';
+import { ConversationExecutionLock } from 'src/agents/utils/conversation-execution-lock';
 import { SseEvent } from 'src/agents/agents.types';
 
 describe('ConversationsService', () => {
@@ -74,6 +75,11 @@ describe('ConversationsService', () => {
         },
         { provide: AgentExecutorService, useValue: executor },
         { provide: TypeORMCheckpointer, useValue: checkpointer },
+        // 执行锁：acquire 直接返回释放函数，测试路径不走真排队
+        {
+          provide: ConversationExecutionLock,
+          useValue: { acquire: jest.fn().mockResolvedValue(jest.fn()) },
+        },
       ],
     }).compile();
 

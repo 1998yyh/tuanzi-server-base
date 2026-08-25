@@ -7,6 +7,7 @@ import { AgentExecutorService } from 'src/agents/agent-executor.service';
 import { ToolRegistryService } from 'src/agents/tools/tool-registry.service';
 import { McpServersService } from 'src/mcp-servers/mcp-servers.service';
 import { SkillToolFactory } from 'src/skills/skill-tool.factory';
+import { DelegateToolFactory } from 'src/agents/tools/delegate-tool.factory';
 import { TypeORMCheckpointer } from 'src/agents/checkpointers/typeorm.checkpointer';
 import { AGENT_ENCRYPTION_KEY } from 'src/agents/utils/encryption-key.provider';
 import { AgentConfig } from 'src/agents/entities/agent-config.entity';
@@ -74,6 +75,8 @@ describe('AgentExecutorService', () => {
         { provide: ToolRegistryService, useValue: toolRegistry },
         { provide: McpServersService, useValue: mcpServersService },
         { provide: SkillToolFactory, useValue: skillToolFactory },
+        // 子代理委派工厂：测试路径不触发委派，createTool 返回占位即可
+        { provide: DelegateToolFactory, useValue: { createTool: jest.fn() } },
         // 用真实 MemorySaver 替代 TypeORMCheckpointer，让图状态流转真实发生
         {
           provide: TypeORMCheckpointer,
@@ -112,6 +115,7 @@ describe('AgentExecutorService', () => {
         {
           role: MessageRole.ASSISTANT,
           content: '你好，我是助手',
+          reasoning: null,
           toolCalls: null,
           totalTokens: null,
         },
@@ -323,7 +327,13 @@ describe('AgentExecutorService', () => {
 
       // 只包含本轮新增的 assistant 消息，不含历史
       expect(second).toEqual([
-        { role: MessageRole.ASSISTANT, content: '第二轮回答', toolCalls: null, totalTokens: null },
+        {
+          role: MessageRole.ASSISTANT,
+          content: '第二轮回答',
+          reasoning: null,
+          toolCalls: null,
+          totalTokens: null,
+        },
       ]);
     });
 
@@ -417,7 +427,13 @@ describe('AgentExecutorService', () => {
 
       expect(toolRegistry.getToolsForAgent).toHaveBeenCalled();
       expect(result).toEqual([
-        { role: MessageRole.ASSISTANT, content: '批量回答', toolCalls: null, totalTokens: null },
+        {
+          role: MessageRole.ASSISTANT,
+          content: '批量回答',
+          reasoning: null,
+          toolCalls: null,
+          totalTokens: null,
+        },
       ]);
     });
 
@@ -430,6 +446,7 @@ describe('AgentExecutorService', () => {
         {
           role: MessageRole.ASSISTANT,
           content: '子 Agent 输出',
+          reasoning: null,
           toolCalls: null,
           totalTokens: null,
         },
