@@ -162,6 +162,47 @@ describe('StockSignalsService', () => {
     });
   });
 
+  describe('ensureMarketRun（观察池 cron 内部入口）', () => {
+    it('done + 非 refresh：复用缓存任务，不新建不开扫', async () => {
+      runRepo.findOne.mockResolvedValue(makeRun());
+      const run = await service.ensureMarketRun('2026-07-31');
+      expect(run.id).toBe('run-1');
+      expect(runRepo.save).not.toHaveBeenCalled();
+      expect(scanner.scan).not.toHaveBeenCalled();
+    });
+
+    it('done + refresh：无视缓存新建 run 强制重扫（cron 两轮都是此语义）', async () => {
+      // latestRun 返回 done（refresh 不复用），executeRun 内 findOne 用同一 mock
+      runRepo.findOne.mockResolvedValue(makeRun());
+      scanner.scan.mockResolvedValue({ results: [], failures: [] });
+      const run = await service.ensureMarketRun('2026-07-31', true);
+      expect(runRepo.save).toHaveBeenCalled();
+      expect(run.id).toBe('run-new');
+      // 系统触发：createdBy 置 null
+      expect(runRepo.create).toHaveBeenCalledWith({ queryDate: '2026-07-31', createdBy: null });
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      expect(scanner.scan).toHaveBeenCalled();
+    });
+
+    it('pending/running 任务即使 refresh=true 也复用（不并发重扫）', async () => {
+      runRepo.findOne.mockResolvedValue(makeRun({ status: ScanRunStatus.RUNNING }));
+      const run = await service.ensureMarketRun('2026-07-31', true);
+      expect(run.id).toBe('run-1');
+      expect(runRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('failed 任务不复用：新建 run 重扫', async () => {
+      runRepo.findOne
+        .mockResolvedValueOnce(makeRun({ status: ScanRunStatus.FAILED }))
+        .mockResolvedValue(makeRun({ status: ScanRunStatus.RUNNING }));
+      scanner.scan.mockResolvedValue({ results: [], failures: [] });
+      const run = await service.ensureMarketRun('2026-07-31');
+      expect(runRepo.save).toHaveBeenCalled();
+      expect(run.id).toBe('run-new');
+    });
+  });
+
   describe('结果查询', () => {
     it('getByDate：无 done 任务抛 404', async () => {
       runRepo.find.mockResolvedValue([]);
