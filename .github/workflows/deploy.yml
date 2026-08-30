@@ -40,8 +40,10 @@ jobs:
 
       - name: 同步源码到服务器
         run: |
-          rsync -az --delete \
+          rsync -rlptzD --delete --no-owner --no-group \
             --exclude '.git' \
+            --exclude '.claude' \
+            --exclude '.husky' \
             --exclude 'node_modules' \
             --exclude 'dist' \
             --exclude 'coverage' \
