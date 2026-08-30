@@ -1,0 +1,74 @@
+name: deploy
+
+# 方案 C：GitHub Actions 编排「服务器端构建」。
+# 跨境墙只挡大流量，rsync 源码（小）能过境；构建在服务器上跑（已加 swap 兜底内存）。
+# 触发：先仅手动验证；跑通后再加 push:main 自动触发。
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建前校验（编译能过再上服务器）
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.32.0 --activate
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: 配置 SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: 下发 .env.production 到服务器
+        run: |
+          printf '%s' "${{ secrets.ENV_PRODUCTION }}" > /tmp/.env.production
+          scp -o BatchMode=yes /tmp/.env.production \
+            ${{ vars.SERVER_USER }}@${{ vars.SERVER_HOST }}:${{ vars.REMOTE_DIR }}/.env.production
+          rm -f /tmp/.env.production
+
+      - name: 同步源码到服务器
+        run: |
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude 'node_modules' \
+            --exclude 'dist' \
+            --exclude 'coverage' \
+            --exclude 'uploads' \
+            --exclude '.env' \
+            --exclude '.env.production' \
+            -e "ssh -o BatchMode=yes" \
+            ./ ${{ vars.SERVER_USER }}@${{ vars.SERVER_HOST }}:${{ vars.REMOTE_DIR }}/
+
+      - name: 服务器端执行 DDL（失败即中止，不重建 app）
+        run: |
+          ssh -o BatchMode=yes ${{ vars.SERVER_USER }}@${{ vars.SERVER_HOST }} \
+            "cd ${{ vars.REMOTE_DIR }} && bash scripts/run-migrations.sh"
+
+      - name: 服务器端重建并重启 app
+        run: |
+          ssh -o BatchMode=yes ${{ vars.SERVER_USER }}@${{ vars.SERVER_HOST }} \
+            "export PATH=/usr/local/bin:\$PATH; cd ${{ vars.REMOTE_DIR }} && docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build app"
+
+      - name: 健康检查
+        run: |
+          ssh -o BatchMode=yes ${{ vars.SERVER_USER }}@${{ vars.SERVER_HOST }} '
+            export PATH=/usr/local/bin:$PATH
+            for i in $(seq 1 20); do
+              code=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:3000/api/auth/login || echo 000)
+              if [ "$code" = "400" ]; then echo "✅ 接口就绪 (HTTP $code)"; exit 0; fi
+              echo "   等待中... ($i/20, HTTP $code)"; sleep 3
+            done
+            echo "❌ 健康检查失败"; docker logs tuanzi-app --tail 50; exit 1
+          '
