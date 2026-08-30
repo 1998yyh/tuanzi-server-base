@@ -2,8 +2,12 @@ name: deploy
 
 # 方案 C：GitHub Actions 编排「服务器端构建」。
 # 跨境墙只挡大流量，rsync 源码（小）能过境；构建在服务器上跑（已加 swap 兜底内存）。
-# 触发：先仅手动验证；跑通后再加 push:main 自动触发。
+# 触发：push 到 main 自动 + 手动（手动重跑旧 ref = 回滚）。纯文档改动不触发。
 on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
   workflow_dispatch:
 
 concurrency:
