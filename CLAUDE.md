@@ -72,7 +72,7 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 
 - API 前缀 `api`（`main.ts` 设置）；Swagger UI: `http://localhost:3000/api/docs`
 - 环境变量加载顺序：`.env.local` 优先于 `.env`（`app.module.ts` 的 `envFilePath`）
-- 部署：`bash deploy.sh`（同步源码 → 服务器重建 app → 健康检查）。**前置会自动跑 `scripts/check-prod-schema.sh`**：代码 `@Entity` 表清单 vs 生产库 `SHOW TABLES`，缺表直接拒绝部署并提示待执行的 `docs/plans/*.sql`——synchronize 关闭后新实体必须先手动执行 DDL 再发版。
+- 部署：**push 到 `main` 自动触发 GitHub Actions**（`.github/workflows/deploy.yml`，方案 C）。流程：CI 编译校验 → rsync 源码到服务器 → `scripts/run-migrations.sh` 自动执行 `docs/plans/*.sql`（`ddl_history` 表记账，失败即中止不重建）→ 服务器 `docker compose --env-file .env.production up -d --build app` → 健康检查（`/api/auth/login` 返 400）。生产 `.env.production` 由 GitHub Secret `ENV_PRODUCTION` 下发；服务器本地 `.env` 供 compose 插值。回滚 = 在 Actions 页面重跑旧 ref 的 workflow（**DDL 只前进**：旧 ref 的新 DDL 已在 `ddl_history` 会自动跳过，数据库不回退）。纯 `**.md` 改动不触发部署。旧 `deploy.sh` 已退役。
 
 ## 核心架构：认证与请求链路
 
@@ -88,7 +88,7 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 - 过期时间走环境变量 `JWT_EXPIRES_IN` / `JWT_REFRESH_EXPIRES_IN`（单位：秒，默认 7200 / 604800）。注意：env 读出来是字符串，代码里必须 `Number()` 转换，否则 jsonwebtoken 会把 `"7200"` 当成 7200 毫秒。
 - `JWT_SECRET` 为必填——`auth.module.ts` 与 `jwt.strategy.ts` 在缺失时会直接抛错（fail fast），不再有默认值兜底。
 - `JwtStrategy.validate` 返回**剔除密码的完整 user 实体**（查库确认用户存在后一次返回），controller 用 `@CurrentUser()` 直接获取，不要二次查库。
-- `synchronize: false`（2026-08 起全环境关闭）：改实体后**手写 DDL 放 `docs/plans/YYYY-MM-DD-*.sql`**，手动在 Adminer（:8080）执行，不写 migration。
+- `synchronize: false`（2026-08 起全环境关闭）：改实体后**手写 DDL 放 `docs/plans/YYYY-MM-DD-*.sql`**，随部署流水线自动执行（`scripts/run-migrations.sh` + `ddl_history` 记账，按文件名排序、跳过已执行）。不写 migration。文件名一旦执行不可改（记账按文件名）；DDL 只前进，不设回退脚本。本地开发仍可在 Adminer（:8080）手动执行调试。
 - 实体通过 `**/*.entity{.ts,.js}` glob 自动发现，新实体放哪都会被加载。
 - 日报模块：只读接口（GET）公开，写接口（POST/PATCH/DELETE）必须 `@UseGuards(JwtAuthGuard)`。
 - Swagger 仅非生产环境注册；CORS 仅在配置 `CORS_ORIGINS` 时开启 credentials（`origin: '*'` 与 credentials 互斥）。
@@ -111,7 +111,7 @@ pnpm test:cov             # 覆盖率（排除 module/dto/entity/main）
 ### ✅ 必须执行
 
 - 所有请求字段走 DTO + class-validator——全局 `ValidationPipe` 开了 `forbidNonWhitelisted`，DTO 未声明的字段会直接 400。
-- 新增实体字段后：手写 DDL 到 `docs/plans/` 并在 Adminer（:8080）执行（synchronize 已全环境关闭）。
+- 新增实体字段后：手写 DDL 到 `docs/plans/YYYY-MM-DD-*.sql`，随部署自动执行（见「数据库」节，`ddl_history` 记账）。本地可在 Adminer（:8080）调试。
 - 新模块/实体/服务写完跑 `pnpm lint` 和 `pnpm test`。
 
 ### ⚠️ 需先询问
