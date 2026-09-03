@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { GenerationService } from 'src/ai-generation/generation.service';
 import {
   GenerationTask,
@@ -74,6 +74,7 @@ describe('GenerationService', () => {
       save: jest.fn(async (v) => v),
       update: jest.fn(async () => ({})),
       findOne: jest.fn(),
+      remove: jest.fn(async (v) => v),
       createQueryBuilder: jest.fn(),
     } as never;
     aiChannelsService = { findWithKey: jest.fn() };
@@ -240,6 +241,25 @@ describe('GenerationService', () => {
       await expect(service.findTask(user as never, 'task-x')).rejects.toThrow(
         '生成任务 #task-x 不存在',
       );
+    });
+  });
+
+  describe('removeTask', () => {
+    it('删除自己的任务', async () => {
+      taskRepo.findOne.mockResolvedValue(task);
+      await service.removeTask(user as never, 'task-1');
+      expect(taskRepo.remove).toHaveBeenCalledWith(task);
+    });
+
+    it('他人任务拒绝删除', async () => {
+      taskRepo.findOne.mockResolvedValue({ ...task, userId: 'user-2' });
+      await expect(service.removeTask(user as never, 'task-1')).rejects.toThrow(ForbiddenException);
+      expect(taskRepo.remove).not.toHaveBeenCalled();
+    });
+
+    it('不存在抛 NotFoundException', async () => {
+      taskRepo.findOne.mockResolvedValue(null);
+      await expect(service.removeTask(user as never, 'task-x')).rejects.toThrow(NotFoundException);
     });
   });
 });

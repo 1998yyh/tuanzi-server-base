@@ -2,6 +2,8 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Post,
@@ -78,5 +80,22 @@ export class GenerationController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.generationService.findTask(user, id);
+  }
+
+  @Post('tasks/:id/delete')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: '删除生成任务',
+    description:
+      '只删任务记录，不删结果媒体（素材库/画布可能仍引用）。进行中的视频任务删掉后轮询不再处理。',
+  })
+  @ApiResponse({ status: 204, description: '删除成功' })
+  @ApiResponse({ status: 403, description: '不是自己的任务' })
+  @ApiResponse({ status: 404, description: '任务不存在' })
+  async removeTask(
+    @CurrentUser() user: Omit<User, 'password'>,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<void> {
+    await this.generationService.removeTask(user, id);
   }
 }

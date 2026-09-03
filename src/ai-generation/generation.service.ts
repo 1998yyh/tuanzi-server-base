@@ -454,6 +454,18 @@ export class GenerationService {
     return this.toTaskView(task);
   }
 
+  /** 删除自己的任务行。不删 resultMedia（素材/画布可能仍引用）。 */
+  async removeTask(user: CurrentUser, id: string): Promise<void> {
+    const task = await this.taskRepo.findOne({ where: { id } });
+    if (!task) {
+      throw new NotFoundException(`生成任务 #${id} 不存在`);
+    }
+    if (task.userId !== user.id) {
+      throw new ForbiddenException('只能删除自己的生成任务');
+    }
+    await this.taskRepo.remove(task);
+  }
+
   private async findTaskEntity(id: string): Promise<GenerationTask> {
     const task = await this.taskRepo.findOne({ where: { id }, relations: ['resultMedia'] });
     if (!task) throw new NotFoundException(`生成任务 #${id} 不存在`);
