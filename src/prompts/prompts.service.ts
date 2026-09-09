@@ -1,6 +1,4 @@
 // Adapted from infinite-canvas (https://github.com/basketikun/infinite-canvas), AGPL-3.0. See NOTICE.
-// 源文件：web/src/services/api/prompts.ts。改造点：localforage → 进程内 Map 缓存（1h SWR）；
-// 源列表从前端 store → prompt_sources 表（内置源 user_id=null 共享 + 用户自建源）
 import {
   BadRequestException,
   ForbiddenException,
@@ -10,83 +8,63 @@ import {
   OnApplicationBootstrap,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Repository } from 'typeorm';
-import { User } from '../users/users.entity';
+import { IsNull, Repository, SelectQueryBuilder } from 'typeorm';
+import { createHash } from 'node:crypto';
+import { User, UserRole } from '../users/users.entity';
 import { PromptSource, PromptSourceView } from './prompt-source.entity';
+import { PromptItem } from './prompt-item.entity';
 import { DEFAULT_PROMPT_SOURCES } from './lib/prompt-presets';
 import { RawPrompt, runPromptSource } from './lib/prompt-normalize';
+import { classifyPrompt } from './lib/prompt-category';
 import { CreatePromptSourceDto, UpdatePromptSourceDto } from './dto/prompt-source.dto';
+import { CreatePromptDto, UpdatePromptDto } from './dto/prompt-item.dto';
 import { QueryPromptsDto } from './dto/query-prompts.dto';
 
 type CurrentUser = Omit<User, 'password'>;
-
 export type Prompt = RawPrompt & {
   sourceId: string;
   category: string;
   githubUrl: string;
+  sourceName: string;
+  canEdit: boolean;
 };
-
 export const ALL_PROMPTS_OPTION = 'all';
-
 export type PromptListResponse = {
   items: Prompt[];
   tags: string[];
   categories: string[];
   total: number;
+  canManage: boolean;
 };
-
 export type PromptSourceStatus = {
   sourceId: string;
   count: number;
   lastSuccessAt: string;
   lastError: string;
 };
-
 export type PromptSourceRefreshResult = PromptSourceStatus & {
   sourceName: string;
   success: boolean;
+  imported: number;
+  skipped: number;
 };
-
 export type PromptSourceRefreshSummary = {
   results: PromptSourceRefreshResult[];
   total: number;
   successCount: number;
   failureCount: number;
 };
-
-type SourceCache = PromptSourceStatus & {
-  items: Prompt[];
-  fetchedAt: number;
-  signature: string;
-};
-
-const CACHE_TTL_MS = 1000 * 60 * 60;
-const FETCH_TIMEOUT_MS = 30_000;
-/** 失败退避窗口：距上次失败不足该时长时不触发重新抓取（连续失败不再每请求一抓） */
-const FETCH_BACKOFF_MS = 5 * 60 * 1000;
-/** refreshAllSources 单批并发数（串行批次，避免一次性打满全部源） */
-const REFRESH_BATCH_SIZE = 4;
-/** 单个用户自建提示词源上限 */
 const MAX_USER_SOURCES = 50;
 
-/**
- * 提示词库：源配置落库，内容走 HTTP 抓取 + 进程内 1h SWR 缓存。
- * 缓存在重启后清空（首访重新抓取），多实例部署各自缓存（可接受）。
- */
+/** 正文只读写 MySQL；外部抓取仅由显式导入触发，绝不在查询或启动时刷新内容。 */
 @Injectable()
 export class PromptsService implements OnApplicationBootstrap {
   private readonly logger = new Logger(PromptsService.name);
-  private readonly cache = new Map<string, SourceCache>();
-  private readonly loadingSources = new Map<string, Promise<PromptSourceRefreshResult>>();
-  /**
-   * 失败退避记忆（sourceId → 最近一次失败时间戳，进程内）。
-   * 多实例局限：各实例各自记忆，重启后清空——与内容缓存同生命周期，可接受。
-   */
-  private readonly lastFailedAt = new Map<string, number>();
-
+  private readonly imports = new Map<string, Promise<PromptSourceRefreshResult>>();
+  private readonly importStatuses = new Map<string, PromptSourceRefreshResult>();
   constructor(
-    @InjectRepository(PromptSource)
-    private readonly sourceRepo: Repository<PromptSource>,
+    @InjectRepository(PromptSource) private readonly sourceRepo: Repository<PromptSource>,
+    @InjectRepository(PromptItem) private readonly itemRepo: Repository<PromptItem>,
   ) {}
 
   /** 内置源幂等种子：按 url 去重，只插缺失的 */
@@ -149,6 +127,7 @@ export class PromptsService implements OnApplicationBootstrap {
     dto: UpdatePromptSourceDto,
   ): Promise<PromptSourceView> {
     const source = await this.findEditableSource(user, id);
+    if (source.userId === null) await this.assertManager(user);
     if (source.isBuiltin) {
       // 内置源只允许切换启用状态（名称/地址/排序保持预置）
       if (
@@ -168,9 +147,7 @@ export class PromptsService implements OnApplicationBootstrap {
       sortOrder: dto.sortOrder ?? source.sortOrder,
     });
     const saved = await this.sourceRepo.save(source);
-    this.cache.delete(id);
-    // 配置变更后重置失败退避，允许立即重新抓取
-    this.lastFailedAt.delete(id);
+
     return this.toView(saved);
   }
 
@@ -178,8 +155,6 @@ export class PromptsService implements OnApplicationBootstrap {
     const source = await this.findEditableSource(user, id);
     if (source.isBuiltin) throw new BadRequestException('内置提示词源不能删除');
     await this.sourceRepo.remove(source);
-    this.cache.delete(id);
-    this.lastFailedAt.delete(id);
   }
 
   /** 校验源存在且对当前用户可见（内置共享 / 自建私有）后返回 */
@@ -192,185 +167,359 @@ export class PromptsService implements OnApplicationBootstrap {
     return source;
   }
 
-  // ---------------------------------------------------------------------------
-  // 提示词查询（SWR 缓存 + 过滤分页）
-  // ---------------------------------------------------------------------------
-
   async fetchPrompts(user: CurrentUser, query: QueryPromptsDto): Promise<PromptListResponse> {
-    const sources = await this.enabledSources(user);
-    const items = await this.getAllPrompts(sources);
-    const keyword = (query.keyword ?? '').trim().toLowerCase();
-    const tags = (query.tag ?? '')
+    const base = this.visibleItems(user);
+    if (query.sourceId) base.andWhere('p.source_id = :sourceId', { sourceId: query.sourceId });
+    const categories = await base
+      .clone()
+      .select('p.category', 'category')
+      .distinct()
+      .getRawMany<{ category: string }>();
+    if (query.category && query.category !== ALL_PROMPTS_OPTION)
+      base.andWhere('p.category = :category', { category: query.category });
+    const keyword = query.keyword?.trim();
+    if (keyword) {
+      // LOCATE 将 %/_ 作为普通文本，避免 LIKE 通配符改变搜索语义。
+      base.andWhere(
+        '(LOCATE(:keyword, p.title) > 0 OR LOCATE(:keyword, p.prompt) > 0 OR LOCATE(:keyword, p.description) > 0 OR LOCATE(:keyword, CAST(p.tags AS CHAR)) > 0)',
+        { keyword },
+      );
+    }
+    const tagRows = await base.clone().select('p.tags').getMany();
+    const tags = [...new Set(tagRows.flatMap((p) => p.tags))].sort();
+    const selectedTags = (query.tag ?? '')
       .split(',')
       .map((t) => t.trim())
       .filter(Boolean);
-    const category = query.category ?? ALL_PROMPTS_OPTION;
-    const page = Math.max(1, query.page);
-    const pageSize = Math.max(1, Math.min(100, query.pageSize));
-
-    const withoutTagFilter = filterPrompts(items, { keyword, category, tags: [] });
-    const filtered = filterPrompts(items, { keyword, category, tags });
-
+    if (selectedTags.length) {
+      base.andWhere(
+        `(${selectedTags.map((_, i) => `JSON_CONTAINS(p.tags, :tag${i})`).join(' OR ')})`,
+        Object.fromEntries(selectedTags.map((t, i) => [`tag${i}`, JSON.stringify(t)])),
+      );
+    }
+    const page = Math.max(1, query.page ?? 1);
+    const pageSize = Math.min(100, Math.max(1, query.pageSize ?? 20));
+    const [items, total] = await base
+      .orderBy('p.created_at', 'DESC')
+      .addOrderBy('p.id', 'ASC')
+      .skip((page - 1) * pageSize)
+      .take(pageSize)
+      .getManyAndCount();
     return {
-      items: filtered.slice((page - 1) * pageSize, page * pageSize),
-      tags: collectTags(withoutTagFilter),
-      categories: sources.map((s) => s.name),
-      total: filtered.length,
+      items: items.map((p) => this.promptView(p, user)),
+      total,
+      tags,
+      categories: categories.map((c) => c.category).sort(),
+      canManage: await this.isManager(user),
     };
   }
 
-  async fetchSourcePrompts(user: CurrentUser, sourceId: string): Promise<Prompt[]> {
-    const source = await this.findEditableSource(user, sourceId);
-    return this.getSourcePrompts(source);
+  async findPrompt(user: CurrentUser, id: string): Promise<Prompt> {
+    return this.promptView(await this.visiblePrompt(user, id), user);
   }
 
-  async refreshSource(user: CurrentUser, sourceId: string): Promise<PromptSourceRefreshResult> {
+  async createPrompt(user: CurrentUser, dto: CreatePromptDto): Promise<Prompt> {
+    await this.assertManager(user);
+    const item = this.itemRepo.create({
+      userId: null,
+      sourceId: null,
+      maintainerId: user.id,
+      importKey: null,
+      title: '',
+      prompt: '',
+      description: '',
+      category: '其他创意',
+      tags: [],
+      metadata: {},
+    });
+    this.applyPromptChanges(item, dto);
+    return this.promptView(await this.itemRepo.save(item), user);
+  }
+
+  async updatePrompt(user: CurrentUser, id: string, dto: UpdatePromptDto): Promise<Prompt> {
+    const item = await this.visiblePrompt(user, id);
+    if (item.userId === null && item.maintainerId !== user.id && user.role !== UserRole.ADMIN)
+      throw new ForbiddenException('只能维护自己的提示词');
+    this.applyPromptChanges(item, dto);
+    // 条件更新不触碰 deleted_at，避免编辑请求晚于删除完成时恢复记录。
+    const result = await this.itemRepo.update(
+      { id: item.id, deletedAt: IsNull() },
+      {
+        title: item.title,
+        prompt: item.prompt,
+        description: item.description,
+        category: item.category,
+        tags: item.tags,
+        metadata: item.metadata,
+      },
+    );
+    if (!result.affected) throw new NotFoundException('提示词不存在');
+    return this.findPrompt(user, item.id);
+  }
+
+  async removePrompt(user: CurrentUser, id: string): Promise<void> {
+    const item = await this.visiblePrompt(user, id);
+    if (item.userId === null && item.maintainerId !== user.id && user.role !== UserRole.ADMIN)
+      throw new ForbiddenException('只能维护自己的提示词');
+    await this.itemRepo.softDelete({ id: item.id });
+  }
+
+  async fetchSourcePrompts(user: CurrentUser, sourceId: string): Promise<Prompt[]> {
+    await this.findEditableSource(user, sourceId);
+    const items = await this.visibleItems(user)
+      .andWhere('p.source_id = :sourceId', { sourceId })
+      .orderBy('p.created_at', 'DESC')
+      .getMany();
+    return items.map((p) => this.promptView(p, user));
+  }
+
+  /** 旧 refresh 路由保留兼容，但只追加未导入项；不更新已有记录。 */
+  async refreshSource(
+    user: CurrentUser,
+    sourceId: string,
+    snapshot?: RawPrompt[],
+  ): Promise<PromptSourceRefreshResult> {
     const source = await this.findEditableSource(user, sourceId);
-    const result = await this.getOrStartRefresh(source);
-    if (!result.success) throw new BadRequestException(result.lastError);
-    return result;
+    if (source.userId === null) await this.assertManager(user);
+    const current = this.imports.get(source.id);
+    if (current) return current;
+    const running = this.importSource(source, snapshot, user.id).finally(() =>
+      this.imports.delete(source.id),
+    );
+    this.imports.set(source.id, running);
+    return running;
   }
 
   async refreshAllSources(user: CurrentUser): Promise<PromptSourceRefreshSummary> {
-    const sources = await this.enabledSources(user);
-    // 分批并发（每批 4 个、串行批次），避免全量 Promise.all 一次性打满所有源
+    const canManage = await this.isManager(user);
+    const sources = (await this.listSources(user)).filter(
+      (s) => s.isActive && (s.userId === user.id || canManage),
+    );
     const results: PromptSourceRefreshResult[] = [];
-    for (let index = 0; index < sources.length; index += REFRESH_BATCH_SIZE) {
-      const batch = sources.slice(index, index + REFRESH_BATCH_SIZE);
-      results.push(...(await Promise.all(batch.map((s) => this.getOrStartRefresh(s)))));
+    for (const source of sources) {
+      try {
+        results.push(await this.refreshSource(user, source.id));
+      } catch {
+        results.push(
+          this.importStatuses.get(source.id) ?? {
+            sourceId: source.id,
+            sourceName: source.name,
+            count: 0,
+            lastSuccessAt: '',
+            lastError: '导入失败，请重试',
+            success: false,
+            imported: 0,
+            skipped: 0,
+          },
+        );
+      }
     }
-    return summarizeRefresh(results);
+    return {
+      results,
+      total: results.reduce((n, r) => n + r.count, 0),
+      successCount: results.filter((r) => r.success).length,
+      failureCount: results.filter((r) => !r.success).length,
+    };
   }
 
   async fetchSourceStatuses(user: CurrentUser): Promise<Record<string, PromptSourceStatus>> {
     const sources = await this.listSources(user);
-    const entries = sources.map((source) => {
-      const cache = this.cache.get(source.id);
-      return [
-        source.id,
-        {
-          sourceId: source.id,
-          count: cache?.items?.length || 0,
-          lastSuccessAt: cache?.lastSuccessAt || '',
-          lastError: cache?.lastError || '',
-        },
-      ] as const;
-    });
-    return Object.fromEntries(entries);
-  }
-
-  // ---------------------------------------------------------------------------
-  // 缓存内部
-  // ---------------------------------------------------------------------------
-
-  private async enabledSources(user: CurrentUser): Promise<PromptSource[]> {
-    const sources = await this.sourceRepo.find({
-      where: [
-        { userId: IsNull(), isActive: true },
-        { userId: user.id, isActive: true },
-      ],
-      order: { sortOrder: 'ASC', createdAt: 'ASC' },
-    });
-    return sources;
-  }
-
-  private async getSourcePrompts(source: PromptSource): Promise<Prompt[]> {
-    const cached = this.cache.get(source.id);
-    if (cached) {
-      if (this.isSourceStale(cached, source)) {
-        void this.getOrStartRefresh(source).catch(() => undefined);
-      }
-      return cached.items;
-    }
-    const result = await this.getOrStartRefresh(source);
-    if (!result.success) throw new BadRequestException(result.lastError);
-    return this.cache.get(source.id)?.items || [];
-  }
-
-  /**
-   * 缓存是否过期：签名变化 / 距上次成功超过 CACHE_TTL_MS；
-   * 距上次失败不足 FETCH_BACKOFF_MS 时处于退避期，即使超 TTL 也不触发重新抓取。
-   */
-  private isSourceStale(cached: SourceCache, source: PromptSource): boolean {
-    if (cached.signature !== sourceSignature(source)) return true;
-    const lastFailedAt = this.lastFailedAt.get(source.id) ?? 0;
-    if (lastFailedAt > 0 && Date.now() - lastFailedAt < FETCH_BACKOFF_MS) return false;
-    return Date.now() - cached.fetchedAt >= CACHE_TTL_MS;
-  }
-
-  private async getAllPrompts(sources: PromptSource[]): Promise<Prompt[]> {
-    const settled = await Promise.all(
-      sources.map(async (source) => {
-        try {
-          return await this.getSourcePrompts(source);
-        } catch {
-          return [];
-        }
-      }),
+    return Object.fromEntries(
+      await Promise.all(
+        sources.map(async (source) => {
+          const latest = await this.itemRepo.findOne({
+            where: { sourceId: source.id },
+            order: { createdAt: 'DESC' },
+            withDeleted: true,
+          });
+          return [
+            source.id,
+            {
+              sourceId: source.id,
+              count: await this.itemRepo.count({ where: { sourceId: source.id } }),
+              lastSuccessAt:
+                this.importStatuses.get(source.id)?.lastSuccessAt ||
+                latest?.createdAt.toISOString() ||
+                '',
+              lastError: this.importStatuses.get(source.id)?.lastError || '',
+            },
+          ];
+        }),
+      ),
     );
-    return settled.flat();
   }
 
-  private getOrStartRefresh(source: PromptSource): Promise<PromptSourceRefreshResult> {
-    const current = this.loadingSources.get(source.id);
-    if (current) return current;
-    const loading = this.refreshSourceRecord(source).finally(() =>
-      this.loadingSources.delete(source.id),
-    );
-    this.loadingSources.set(source.id, loading);
-    return loading;
-  }
-
-  private async refreshSourceRecord(source: PromptSource): Promise<PromptSourceRefreshResult> {
-    const previous = this.cache.get(source.id);
+  /** CLI 和 HTTP 共用同一导入实现，失败可重试，唯一键在多实例并发下兜底。 */
+  private async importSource(
+    source: PromptSource,
+    snapshot?: RawPrompt[],
+    maintainerId?: string,
+  ): Promise<PromptSourceRefreshResult> {
+    let imported = 0;
+    let skipped = 0;
     try {
-      const items = withSourceMeta(
-        source,
-        await runPromptSource(source, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }),
-      );
-      const lastSuccessAt = new Date().toISOString();
-      this.lastFailedAt.delete(source.id);
-      this.cache.set(source.id, {
-        sourceId: source.id,
-        items,
-        count: items.length,
-        fetchedAt: Date.now(),
-        lastSuccessAt,
-        lastError: '',
-        signature: sourceSignature(source),
-      });
-      return {
+      const items =
+        snapshot ?? (await runPromptSource(source, { signal: AbortSignal.timeout(30_000) }));
+      for (const raw of items) {
+        const importKey = createHash('sha256').update(`${source.id}\n${raw.id}`).digest('hex');
+        const existing = await this.itemRepo.findOne({ where: { importKey }, withDeleted: true });
+        if (existing) {
+          skipped++;
+          continue;
+        }
+        const {
+          id: _id,
+          title,
+          prompt,
+          description,
+          tags,
+          createdAt: _createdAt,
+          updatedAt: _updatedAt,
+          ...metadata
+        } = raw;
+        void _id;
+        void _createdAt;
+        void _updatedAt;
+        try {
+          await this.itemRepo.save(
+            this.itemRepo.create({
+              userId: source.userId,
+              maintainerId: maintainerId ?? null,
+              sourceId: source.id,
+              importKey,
+              title,
+              prompt,
+              description: description || '',
+              category: classifyPrompt(raw),
+              tags: cleanTags(tags),
+              metadata: {
+                ...metadata,
+                githubUrl: raw.sourceUrl || source.homepage,
+                sourceName: source.name,
+              },
+            }),
+          );
+          imported++;
+        } catch (error) {
+          if ((error as { code?: string }).code === 'ER_DUP_ENTRY') skipped++;
+          else throw error;
+        }
+      }
+      const result = {
         sourceId: source.id,
         sourceName: source.name,
-        count: items.length,
-        lastSuccessAt,
+        count: await this.itemRepo.count({ where: { sourceId: source.id } }),
+        lastSuccessAt: new Date().toISOString(),
         lastError: '',
         success: true,
+        imported,
+        skipped,
       };
+      this.importStatuses.set(source.id, result);
+      return result;
     } catch (error) {
-      // lastError 只写脱敏后的通用文案；原始细节（含状态码/DNS/TLS）挂在 error.cause 上记日志
-      const lastError = error instanceof Error ? error.message : String(error);
-      const detail = error instanceof Error ? (error.cause ?? error.message) : String(error);
-      this.lastFailedAt.set(source.id, Date.now());
-      this.cache.set(source.id, {
-        sourceId: source.id,
-        items: previous?.items || [],
-        count: previous?.items?.length || 0,
-        fetchedAt: previous?.fetchedAt || 0,
-        lastSuccessAt: previous?.lastSuccessAt || '',
-        lastError,
-        signature: previous?.signature || sourceSignature(source),
-      });
-      this.logger.warn(`提示词源「${source.name}」刷新失败：${detail}`);
-      return {
+      this.logger.warn(
+        `提示词源「${source.name}」导入失败：${error instanceof Error ? error.message : '未知错误'}`,
+      );
+      this.importStatuses.set(source.id, {
         sourceId: source.id,
         sourceName: source.name,
-        count: previous?.items?.length || 0,
-        lastSuccessAt: previous?.lastSuccessAt || '',
-        lastError,
+        count: await this.itemRepo.count({ where: { sourceId: source.id } }),
+        lastSuccessAt: '',
+        lastError: '导入失败，已保存的内容不受影响，可重试',
         success: false,
-      };
+        imported,
+        skipped,
+      });
+      throw new BadRequestException('提示词导入失败，已保存的内容不受影响，可重试');
     }
+  }
+
+  private visibleItems(user: CurrentUser): SelectQueryBuilder<PromptItem> {
+    return this.itemRepo
+      .createQueryBuilder('p')
+      .where('(p.user_id IS NULL OR p.user_id = :userId)', { userId: user.id });
+  }
+
+  private async visiblePrompt(user: CurrentUser, id: string): Promise<PromptItem> {
+    const item = await this.itemRepo.findOne({ where: { id } });
+    if (!item || (item.userId !== null && item.userId !== user.id))
+      throw new NotFoundException('提示词不存在');
+    return item;
+  }
+
+  private async isManager(user: CurrentUser): Promise<boolean> {
+    return (
+      user.role === UserRole.ADMIN ||
+      this.itemRepo.exists({
+        where: { userId: IsNull(), maintainerId: user.id },
+        withDeleted: true,
+      })
+    );
+  }
+
+  private async assertManager(user: CurrentUser): Promise<void> {
+    if (!(await this.isManager(user))) throw new ForbiddenException('仅词库维护者可执行此操作');
+  }
+
+  /** 仅供服务器 CLI 初次导入，HTTP 控制器不暴露此入口；调用方选择具体维护者。 */
+  async importBuiltinSnapshot(
+    owner: CurrentUser,
+    sourceId: string,
+    snapshot: RawPrompt[],
+  ): Promise<PromptSourceRefreshResult> {
+    const source = await this.findEditableSource(owner, sourceId);
+    if (!source.isBuiltin || source.userId !== null)
+      throw new BadRequestException('初次导入仅支持内置公共源');
+    return this.importSource(source, snapshot, owner.id);
+  }
+
+  private applyPromptChanges(item: PromptItem, dto: UpdatePromptDto): void {
+    if (Object.values(dto).some((v) => v === null))
+      throw new BadRequestException('提示词字段不能为 null');
+    for (const key of ['title', 'prompt', 'description', 'category'] as const) {
+      if (dto[key] !== undefined) item[key] = dto[key].trim();
+    }
+    if (!item.title || !item.prompt || !item.category || item.category === 'all')
+      throw new BadRequestException('标题、正文和分类不能为空，分类不能使用 all');
+    if (dto.tags !== undefined) item.tags = cleanTags(dto.tags);
+    const {
+      title: _title,
+      prompt: _prompt,
+      description: _description,
+      category: _category,
+      tags: _tags,
+      ...metadata
+    } = dto;
+    void _title;
+    void _prompt;
+    void _description;
+    void _category;
+    void _tags;
+    item.metadata = { ...item.metadata, ...metadata };
+  }
+
+  private promptView(item: PromptItem, user: CurrentUser): Prompt {
+    return {
+      coverUrl: '',
+      referenceImageUrls: [],
+      preview: '',
+      ...item.metadata,
+      id: item.id,
+      title: item.title,
+      prompt: item.prompt,
+      description: item.description,
+      tags: item.tags,
+      category: item.category,
+      sourceId: item.sourceId ?? '',
+      sourceName: item.metadata.sourceName || '内部维护',
+      githubUrl: item.metadata.githubUrl || '',
+      createdAt: item.createdAt.toISOString(),
+      updatedAt: item.updatedAt.toISOString(),
+      canEdit:
+        item.userId === user.id ||
+        (item.userId === null && (item.maintainerId === user.id || user.role === UserRole.ADMIN)),
+    };
   }
 
   private toView(source: PromptSource): PromptSourceView {
@@ -380,56 +529,6 @@ export class PromptsService implements OnApplicationBootstrap {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 纯函数（移植自 prompts.ts）
-// ---------------------------------------------------------------------------
-
-function sourceSignature(source: PromptSource): string {
-  const value = `${source.name}\n${source.url}\n${source.homepage}`;
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) hash = (hash * 31 + value.charCodeAt(i)) | 0;
-  return `${value.length}:${hash}`;
-}
-
-function withSourceMeta(source: PromptSource, items: RawPrompt[]): Prompt[] {
-  return items.map((item) => ({
-    ...item,
-    description: item.description || '',
-    referenceImageUrls: Array.isArray(item.referenceImageUrls) ? item.referenceImageUrls : [],
-    sourceId: source.id,
-    category: source.name,
-    githubUrl: item.sourceUrl || source.homepage,
-  }));
-}
-
-function summarizeRefresh(results: PromptSourceRefreshResult[]): PromptSourceRefreshSummary {
-  return {
-    results,
-    total: results.reduce((total, item) => total + item.count, 0),
-    successCount: results.filter((item) => item.success).length,
-    failureCount: results.filter((item) => !item.success).length,
-  };
-}
-
-function filterPrompts(
-  items: Prompt[],
-  options: { keyword: string; category: string; tags: string[] },
-) {
-  return items.filter((item) => {
-    if (isActiveOption(options.category) && item.category !== options.category) return false;
-    if (options.tags.length && !options.tags.some((tag) => item.tags.includes(tag))) return false;
-    if (!options.keyword) return true;
-    return [item.title, item.prompt, item.description, item.category, ...item.tags]
-      .join(' ')
-      .toLowerCase()
-      .includes(options.keyword);
-  });
-}
-
-function collectTags(items: Prompt[]): string[] {
-  return Array.from(new Set(items.flatMap((item) => item.tags).filter(Boolean)));
-}
-
-function isActiveOption(value: string): boolean {
-  return Boolean(value) && value !== ALL_PROMPTS_OPTION;
+function cleanTags(tags: string[]): string[] {
+  return [...new Set(tags.map((t) => t.trim()).filter(Boolean))];
 }

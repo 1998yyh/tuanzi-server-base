@@ -1,8 +1,13 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsInt, IsOptional, IsString, IsUUID, Max, Min } from 'class-validator';
 
 export class QueryPromptsDto {
+  @ApiProperty({ required: false, description: '按导入来源筛选' })
+  @IsOptional()
+  @IsUUID()
+  sourceId?: string;
+
   @ApiProperty({ required: false, description: '关键词（标题/内容/描述/标签模糊匹配）' })
   @IsString()
   @IsOptional()
@@ -13,7 +18,7 @@ export class QueryPromptsDto {
   @IsOptional()
   tag?: string;
 
-  @ApiProperty({ required: false, example: 'all', description: '分类（源名称），all 表示全部' })
+  @ApiProperty({ required: false, example: 'all', description: '用途分类，all 表示全部' })
   @IsString()
   @IsOptional()
   category?: string;

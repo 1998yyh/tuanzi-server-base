@@ -16,6 +16,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { User } from '../users/users.entity';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { CreatePromptDto, UpdatePromptDto } from './dto/prompt-item.dto';
 import { PromptsService } from './prompts.service';
 import { CreatePromptSourceDto, UpdatePromptSourceDto } from './dto/prompt-source.dto';
 import { QueryPromptsDto } from './dto/query-prompts.dto';
@@ -93,7 +94,7 @@ export class PromptsController {
   }
 
   @Post('sources/:id/refresh')
-  @ApiOperation({ summary: '强制刷新单个源（绕过缓存）' })
+  @ApiOperation({ summary: '导入单个源（仅追加，不覆盖编辑或恢复删除项）' })
   @ApiResponse({ status: 200, description: '刷新成功' })
   @ApiResponse({ status: 400, description: '抓取失败' })
   async refreshSource(
@@ -104,9 +105,44 @@ export class PromptsController {
   }
 
   @Post('refresh-all')
-  @ApiOperation({ summary: '刷新所有启用的源' })
+  @ApiOperation({ summary: '导入所有可维护且启用的源（仅追加）' })
   @ApiResponse({ status: 200, description: '刷新完成（含各源成败明细）' })
   async refreshAllSources(@CurrentUser() user: Omit<User, 'password'>) {
     return this.promptsService.refreshAllSources(user);
+  }
+  @Post()
+  @ApiOperation({ summary: '新增内部提示词（词库维护者）' })
+  @ApiResponse({ status: 201, description: '已保存' })
+  createPrompt(@CurrentUser() user: Omit<User, 'password'>, @Body() dto: CreatePromptDto) {
+    return this.promptsService.createPrompt(user, dto);
+  }
+
+  @Get(':id')
+  @ApiOperation({ summary: '提示词详情' })
+  @ApiResponse({ status: 200, description: '获取成功' })
+  findPrompt(@CurrentUser() user: Omit<User, 'password'>, @Param('id', ParseUUIDPipe) id: string) {
+    return this.promptsService.findPrompt(user, id);
+  }
+
+  @Patch(':id')
+  @ApiOperation({ summary: '编辑并保存提示词' })
+  @ApiResponse({ status: 200, description: '已保存' })
+  updatePrompt(
+    @CurrentUser() user: Omit<User, 'password'>,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdatePromptDto,
+  ) {
+    return this.promptsService.updatePrompt(user, id, dto);
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: '删除提示词（重复导入不会恢复）' })
+  @ApiResponse({ status: 204, description: '已删除' })
+  removePrompt(
+    @CurrentUser() user: Omit<User, 'password'>,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.promptsService.removePrompt(user, id);
   }
 }

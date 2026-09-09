@@ -12,7 +12,7 @@ import { User } from '../users/users.entity';
 
 /**
  * 提示词源：user_id 为 null 表示内置源（所有用户共享、只读），
- * 否则为用户自建源。Prompt 内容本身不入库——服务层抓取源 URL + 内存缓存。
+ * 否则为用户自建源。提示词正文存入 prompt_items，源仅用于显式导入与来源追溯。
  */
 @Entity('prompt_sources')
 @Index(['userId'])
