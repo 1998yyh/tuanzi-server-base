@@ -26,7 +26,7 @@ src/
   media/          # 媒体上传/落盘（saveBuffer 是生成结果主写入路径）+ /uploads/media
   ai-generation/  # AI 渠道 CRUD + resolveChatModel + 图/视/音生成 + cron 视频轮询
   canvas/         # 无限画布：document JSON + version 乐观锁；唯一写路径 applyMutation
-  prompts/        # 提示词源（内容不入库；抓取 + 进程内 Map 缓存 1h SWR）
+  prompts/        # 内部提示词库（MySQL 正文 + 用途分类；指定维护者管理公共库，显式追加导入）
   assets/         # 素材库 text/image/video（媒体挂 media_id FK）
   uploads/        # ⚠️ 孤儿模块：Multer 磁盘配置，未在 app.module 注册
   common/         # guards / decorators / filters / crypto.util / ssrf.util
@@ -38,6 +38,8 @@ src/
 - `uploads/` 目录（仓库根）存封面图与媒体；`main.ts` 静态服务在 `/uploads/` 前缀（在 `/api` 之外，前端拼 URL 要补 origin）。静态响应带 `X-Content-Type-Options: nosniff` 与 CSP sandbox（防存储型 XSS）。媒体落盘目录是 `uploads/media`（`MediaService.MEDIA_DIR`）。
 - `ScheduleModule.forRoot()` **只在 `AgentsModule` 调用一次**（Nest 全局）。视频轮询的 `@Cron` 挂在 `AiGenerationModule`，依赖 Agents 模块被加载才会跑。
 - `agent_configs.mcp_servers` JSON 列（`legacyMcpServers`）已废弃，代码不再读写；MCP 走 `mcp_servers` + `agent_config_mcp_servers`。
+
+- 修改提示词导入、删除或分类行为前，阅读 `docs/plans/2026-09-09-internal-prompt-library-design.md`。
 
 ## 可执行命令
 

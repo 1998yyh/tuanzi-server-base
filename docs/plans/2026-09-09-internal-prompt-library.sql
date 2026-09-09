@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS prompt_items (
+  id VARCHAR(36) NOT NULL PRIMARY KEY,
+  user_id VARCHAR(36) NULL,
+  source_id VARCHAR(36) NULL,
+  maintainer_id VARCHAR(36) NULL,
+  import_key CHAR(64) NULL,
+  title TEXT NOT NULL,
+  prompt LONGTEXT NOT NULL,
+  description TEXT NOT NULL,
+  category VARCHAR(100) NOT NULL DEFAULT '其他创意',
+  tags JSON NOT NULL,
+  metadata JSON NOT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  deleted_at DATETIME(6) NULL,
+  UNIQUE KEY uq_prompt_items_import (import_key),
+  KEY idx_prompt_items_owner_category (user_id, category),
+  KEY idx_prompt_items_source (source_id),
+  KEY idx_prompt_items_maintainer (maintainer_id),
+  CONSTRAINT fk_prompt_items_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
