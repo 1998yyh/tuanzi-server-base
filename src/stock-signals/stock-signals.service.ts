@@ -23,8 +23,8 @@ export interface BSignalItem {
   name: string;
 }
 
-/** 沪深主板代码段（与原 b-signal-scanner 页面一致，排除创业板/科创板） */
-const MAIN_BOARD_CODE = /^(?:000|001|002|003|600|601|603|605)\d{3}$/;
+/** 沪深主板代码段（与原 b-signal-scanner 页面一致，排除创业板/科创板）；观察池模块复用 */
+export const MAIN_BOARD_CODE = /^(?:000|001|002|003|600|601|603|605)\d{3}$/;
 const CODE_PATTERN = /^(?:(sh|sz))?(\d{6})$/;
 /** 任务进度写库的节流粒度：每扫完 50 只更新一次 */
 const PROGRESS_FLUSH_EVERY = 50;
@@ -289,6 +289,60 @@ export class StockSignalsService implements OnModuleInit {
     };
   }
 
+  // ---- 观察池复用的内部入口 ----
+
+  /**
+   * 内部入口（观察池 cron 用）：确保某日全市场扫描已触发。
+   * 与 requestScan 同一契约：pending/running 任务总是复用（不并发重扫）；
+   * done 任务在 refresh=false 时复用缓存，refresh=true 时新建 run 强制重抓——
+   * cron 两轮都是 refresh（14:50 轮的核心目的就是抓 10:00 之后新出现的当日信号），
+   * 手动用户扫描的缓存契约不受影响。failed 或无任务时新建 run。
+   * 系统触发，createdBy 置 null。调用方需自行保证 date 是合法交易日。
+   */
+  async ensureMarketRun(date: string, refresh = false): Promise<StockSignalScanRun> {
+    const latest = await this.latestRun(date);
+    if (latest?.status === ScanRunStatus.PENDING || latest?.status === ScanRunStatus.RUNNING) {
+      return latest;
+    }
+    if (latest?.status === ScanRunStatus.DONE && !refresh) {
+      return latest;
+    }
+    const run = await this.runRepo.save(this.runRepo.create({ queryDate: date, createdBy: null }));
+    // 与 requestScan 同一姿势：异步执行不阻塞，兜底 catch 防未捕获 rejection
+    void this.executeRun(run.id).catch((e) =>
+      this.logger.error('全市场扫描任务异常', e?.stack ?? e),
+    );
+    return run;
+  }
+
+  /**
+   * 内部入口（观察池 cron 用）：轮询 run 到终态（done/failed）或超时。
+   * 全市场扫描是分钟级异步任务，cron 必须等落定后再做 S 评估；
+   * 超时返回最后一瞥的状态（可能仍是 running），由调用方决定放弃与否。
+   */
+  async waitRunFinished(
+    runId: string,
+    timeoutMs: number,
+    intervalMs = 10_000,
+  ): Promise<StockSignalScanRun | null> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const run = await this.runRepo.findOne({ where: { id: runId } });
+      if (!run) return null;
+      if (run.status === ScanRunStatus.DONE || run.status === ScanRunStatus.FAILED) return run;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    return this.runRepo.findOne({ where: { id: runId } });
+  }
+
+  /**
+   * 内部入口（观察池手动 check 用）：同步刷新指定代码当日信号（强制重抓，忽略缓存）。
+   * 调用方保证 codes 非空；空池子必须先短路——scanCodes 不接受空数组语义。
+   */
+  async refreshCodes(date: string, codes: string[]) {
+    return this.scanCodes(date, codes, true);
+  }
+
   // ---- 私有工具 ----
 
   private latestRun(date: string) {
@@ -333,8 +387,8 @@ export class StockSignalsService implements OnModuleInit {
     return day === 0 || day === 6;
   }
 
-  /** 北京时间今天（YYYY-MM-DD） */
-  private chinaToday(): string {
+  /** 北京时间今天（YYYY-MM-DD）；public：观察池 cron 复用 */
+  chinaToday(): string {
     const parts = new Intl.DateTimeFormat('en-CA', {
       timeZone: 'Asia/Shanghai',
       year: 'numeric',

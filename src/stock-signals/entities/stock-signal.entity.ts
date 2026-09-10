@@ -8,6 +8,8 @@ export type StockMarket = 'sh' | 'sz';
  */
 @Entity('stock_signals')
 @Index(['signalDate', 'code'], { unique: true })
+// 观察池 S 评估按 code 回查信号（WHERE code=? AND signal_date>?），需独立索引
+@Index(['code', 'signalDate'])
 export class StockSignal {
   @PrimaryGeneratedColumn('uuid')
   id: string;
