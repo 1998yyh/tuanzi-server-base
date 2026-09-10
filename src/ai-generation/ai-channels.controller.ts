@@ -26,6 +26,13 @@ import { UpdateAiChannelDto } from './dto/update-ai-channel.dto';
 export class AiChannelsController {
   constructor(private readonly aiChannelsService: AiChannelsService) {}
 
+  @Get('presets')
+  @ApiOperation({ summary: '获取内置渠道预设和视频素材模板' })
+  @ApiResponse({ status: 200, description: '获取成功，不包含凭据' })
+  getPresets() {
+    return this.aiChannelsService.getPresets();
+  }
+
   @Get()
   @ApiOperation({ summary: '我的 AI 渠道列表', description: 'apiKey 只回脱敏值' })
   @ApiResponse({ status: 200, description: '获取成功' })

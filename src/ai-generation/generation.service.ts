@@ -15,6 +15,7 @@ import { MediaService } from '../media/media.service';
 import { CanvasOpsService } from '../canvas/canvas-ops.service';
 import { AiChannelsService } from './ai-channels.service';
 import { ModelCapability } from './entities/ai-channel.entity';
+import { resolveVideoModelConfig } from './video-presets';
 import { GenerationTask, GenerationTaskStatus } from './entities/generation-task.entity';
 import { GenerateImageDto } from './dto/generate-image.dto';
 import { GenerateVideoDto } from './dto/generate-video.dto';
@@ -102,11 +103,12 @@ export class GenerationService {
     if (!channel.isActive) {
       throw new BadRequestException(`渠道 "${channel.name}" 已停用`);
     }
-    const model = channel.models.find((m) => m.name === modelName);
-    if (!model) {
+    const candidates = channel.models.filter((m) => m.name === modelName);
+    if (!candidates.length) {
       throw new BadRequestException(`渠道 "${channel.name}" 下不存在模型 "${modelName}"`);
     }
-    if (model.capability !== capability) {
+    const model = candidates.find((m) => m.capability === capability);
+    if (!model) {
       throw new BadRequestException(`模型 "${modelName}" 不是${capability}能力模型`);
     }
     return {
@@ -115,6 +117,11 @@ export class GenerationService {
       apiKey,
       apiFormat: channel.apiFormat,
       model: model.name,
+      ...(capability === ModelCapability.VIDEO
+        ? {
+            videoConfig: resolveVideoModelConfig(channel.baseUrl, model.name, model.videoConfig),
+          }
+        : {}),
     };
   }
 
@@ -383,7 +390,10 @@ export class GenerationService {
     const imageReferences: VideoImageReference[] = [];
     const videoReferenceUrls: string[] = [];
     const audioReferenceUrls: string[] = [];
-    for (const media of medias) {
+    // 数据库 IN 查询不保证顺序；首尾帧必须保持调用方传入的顺序。
+    const mediaById = new Map(medias.map((media) => [media.id, media]));
+    for (const mediaId of mediaIds) {
+      const media = mediaById.get(mediaId)!;
       if (media.kind === MediaKind.IMAGE) {
         if (media.bytes > SEEDANCE_REFERENCE_LIMITS.imageMaxBytes) {
           throw new BadRequestException(`参考图片 "${media.fileName}" 超过 30MB 限制`);

@@ -24,6 +24,9 @@ const arkConfig: ResolvedChannelConfig = {
 
 const mockFetch = jest.fn();
 global.fetch = mockFetch as never;
+jest.mock('node:dns/promises', () => ({
+  lookup: jest.fn(async () => [{ address: '8.8.8.8', family: 4 }]),
+}));
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -71,6 +74,293 @@ describe('video-generation.provider', () => {
   });
 
   describe('createVideoTask（openai 兼容）', () => {
+    it('配置模板的渠道地址不允许指向内网', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ id: 'unsafe' }));
+      await expect(
+        createVideoTask(
+          {
+            ...openaiConfig,
+            baseUrl: 'http://127.0.0.1:3000',
+            videoConfig: { template: 'text', requestFormat: 'json' },
+          } as any,
+          { prompt: '测试' },
+        ),
+      ).rejects.toThrow('内网');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('配置模板不跟随创建任务响应的重定向', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({}, 307));
+      await expect(
+        createVideoTask(
+          { ...openaiConfig, videoConfig: { template: 'text', requestFormat: 'json' } } as any,
+          { prompt: '测试' },
+        ),
+      ).rejects.toThrow('重定向');
+      expect(mockFetch.mock.calls[0][1].redirect).toBe('manual');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+    it('自定义渠道模型按配置映射 JSON 字段，不依赖域名或模型名', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ id: 'custom-video' }));
+      const config = {
+        ...openaiConfig,
+        model: 'custom-first-last',
+        videoConfig: {
+          template: 'first_last' as const,
+          requestFormat: 'json' as const,
+          fields: {
+            firstFrame: 'start_image',
+            lastFrame: 'end_image',
+            seconds: 'duration',
+            resolution: 'quality',
+            aspectRatio: 'ratio',
+          },
+          maxSeconds: 8,
+          resolutions: ['480p', '720p'],
+        },
+      };
+      await createVideoTask(config, {
+        prompt: '转场',
+        seconds: '8',
+        size: '9:16',
+        vquality: '480p',
+        imageReferences: refs(2),
+      });
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({
+        model: 'custom-first-last',
+        prompt: '转场',
+        duration: 8,
+        quality: '480p',
+        ratio: '9:16',
+        start_image: 'https://8.8.8.8/0.png',
+        end_image: 'https://8.8.8.8/1.png',
+      });
+    });
+
+    it('自定义 multipart 模板按指定字段上传图片文件', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ id: 'custom-video' }));
+      const config = {
+        ...openaiConfig,
+        videoConfig: {
+          template: 'image' as const,
+          requestFormat: 'multipart' as const,
+          fields: { images: 'reference' },
+          minImages: 1,
+          maxImages: 1,
+        },
+      };
+      await createVideoTask(config, { prompt: '动起来', imageReferences: refs(1) });
+      const body = mockFetch.mock.calls[0][1].body as FormData;
+      expect(body.get('reference')).toBeInstanceOf(Blob);
+      expect(body.get('prompt')).toBe('动起来');
+      expect(mockFetch.mock.calls[0][1].headers).not.toHaveProperty('Content-Type');
+    });
+
+    it('显式模板覆盖同名内置预设', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ id: 'custom-video' }));
+      await createVideoTask(
+        {
+          ...h3Config,
+          videoConfig: { template: 'text', requestFormat: 'json', maxSeconds: 4, resolutions: [] },
+        } as any,
+        { prompt: '无图视频', seconds: '4' },
+      );
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({
+        model: h3Config.model,
+        prompt: '无图视频',
+        seconds: 4,
+      });
+    });
+
+    it('自定义清晰度名称原样映射，固定时长无需填写最大时长', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ id: 'custom-video' }));
+      await createVideoTask(
+        {
+          ...openaiConfig,
+          videoConfig: {
+            template: 'text',
+            requestFormat: 'json',
+            fixedSeconds: 30,
+            resolutions: ['standard', 'high'],
+          },
+        } as any,
+        { prompt: '测试', vquality: 'high' },
+      );
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toMatchObject({
+        seconds: 30,
+        resolution: 'high',
+      });
+    });
+
+    const h3Config = {
+      ...openaiConfig,
+      baseUrl: 'https://ai.939593.xyz/v1',
+      model: 'minimax_h3_first_last',
+    };
+    const refs = (count: number) =>
+      Array.from({ length: count }, (_, i) => ({
+        dataUrl: 'data:image/png;base64,AAAA',
+        url: `https://8.8.8.8/${i}.png`,
+        mimeType: 'image/png',
+        fileName: `${i}.png`,
+      }));
+
+    it('按渠道文档直接用 JSON 传首尾帧、数字秒数和清晰度', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ id: 'h3-video' }));
+      await createVideoTask(h3Config, {
+        prompt: '过渡',
+        seconds: '5',
+        size: '1280x720',
+        vquality: '480p',
+        imageReferences: refs(2),
+      });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const init = mockFetch.mock.calls[0][1];
+      expect(init.headers['Content-Type']).toBe('application/json');
+      expect(JSON.parse(init.body)).toEqual({
+        model: h3Config.model,
+        prompt: '过渡',
+        seconds: 5,
+        resolution: '480P',
+        aspect_ratio: '16:9',
+        first_frame: 'https://8.8.8.8/0.png',
+        last_frame: 'https://8.8.8.8/1.png',
+      });
+    });
+
+    it.each([0, 1, 3])('首尾帧模型传 %i 张图在提交前报中文错误', async (count) => {
+      await expect(
+        createVideoTask(h3Config, { prompt: '过渡', imageReferences: refs(count) }),
+      ).rejects.toThrow('首帧和尾帧');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('H3 图生视频支持 9 张图，auto 不传比例', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ id: 'h3-video' }));
+      await createVideoTask(
+        { ...h3Config, model: 'minimax_h3_i2v' },
+        { prompt: '动起来', seconds: '12', size: 'auto', imageReferences: refs(9) },
+      );
+      const payload = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(payload.input_reference).toHaveLength(9);
+      expect(payload.seconds).toBe(12);
+      expect(payload).not.toHaveProperty('aspect_ratio');
+      expect(payload).not.toHaveProperty('size');
+    });
+
+    it('H3 图生视频超出 12 秒时拒绝，不能静默裁剪', async () => {
+      await expect(
+        createVideoTask(
+          { ...h3Config, model: 'minimax_h3_i2v' },
+          { prompt: '动起来', seconds: '15', imageReferences: refs(1) },
+        ),
+      ).rejects.toThrow('12');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('H3 不支持的清晰度在提交前拒绝', async () => {
+      await expect(
+        createVideoTask(h3Config, { prompt: '过渡', vquality: '1080p', imageReferences: refs(2) }),
+      ).rejects.toThrow('480P');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('H3 对口型把一段音频映射为 audio', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ id: 'h3-video' }));
+      await createVideoTask(
+        { ...h3Config, model: 'minimax_h3_lipsync' },
+        { prompt: '说话', imageReferences: refs(1), audioReferenceUrls: ['https://8.8.8.8/a.mp3'] },
+      );
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toMatchObject({
+        audio: 'https://8.8.8.8/a.mp3',
+        input_reference: ['https://8.8.8.8/0.png'],
+      });
+    });
+
+    it('Vela 直接传 images，使用预设的固定时长和清晰度', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ id: 'vela-video' }));
+      await createVideoTask(
+        { ...h3Config, model: 'vela-2.5' },
+        {
+          prompt: '动起来',
+          seconds: '5',
+          size: '1:1',
+          vquality: '480p',
+          imageReferences: refs(10),
+        },
+      );
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({
+        model: 'vela-2.5',
+        prompt: '动起来',
+        aspect_ratio: '1:1',
+        seconds: 30,
+        resolution: '720P',
+        images: refs(10).map((r) => r.url),
+      });
+    });
+
+    it('其他渠道相同模型名保留原有协议', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ id: 'other-video' }));
+      await createVideoTask(
+        { ...h3Config, baseUrl: 'https://other.example.com' },
+        { prompt: '过渡', imageReferences: refs(2) },
+      );
+      expect(mockFetch.mock.calls[0][1].body).toBeInstanceOf(FormData);
+    });
+
+    it('备用域名的文生视频同样直接提交 JSON', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ id: 'text-video' }));
+      await createVideoTask(
+        { ...h3Config, baseUrl: 'https://cdn-ai.939593.xyz', model: 'minimax_h3_t2v' },
+        { prompt: '翠鸟捕鱼', seconds: '15', size: 'auto', vquality: '720p' },
+      );
+      expect(mockFetch.mock.calls[0][0]).toBe('https://cdn-ai.939593.xyz/v1/videos');
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({
+        model: 'minimax_h3_t2v',
+        prompt: '翠鸟捕鱼',
+        seconds: 15,
+        resolution: '720P',
+      });
+    });
+
+    it.each([
+      ['minimax_h3_i2v', { imageReferences: refs(10) }, '最多 9'],
+      ['minimax_h3_i2v', {}, '需要参考图片'],
+      ['minimax_h3_t2v', { imageReferences: refs(1) }, '不支持参考图片'],
+      ['minimax_h3_lipsync', { imageReferences: refs(1) }, '1 段参考音频'],
+      [
+        'minimax_h3_i2v',
+        { imageReferences: refs(1), audioReferenceUrls: ['https://8.8.8.8/a.mp3'] },
+        '不支持参考音频',
+      ],
+      [
+        'minimax_h3_i2v',
+        { imageReferences: refs(1), videoReferenceUrls: ['https://8.8.8.8/a.mp4'] },
+        '不支持参考视频',
+      ],
+      ['minimax_h3_t2v', { seconds: '1.5' }, '整数'],
+      ['minimax_h3_t2v', { seconds: '16' }, '15'],
+      ['minimax_h3_t2v', { size: '4:3' }, '比例'],
+      [
+        'minimax_h3_i2v',
+        { imageReferences: [{ ...refs(1)[0], url: 'http://127.0.0.1/a.png' }] },
+        '公网',
+      ],
+    ])('文档渠道拒绝非法素材或参数：%s %j', async (model, request, message) => {
+      await expect(
+        createVideoTask({ ...h3Config, model }, { prompt: '测试', ...request }),
+      ).rejects.toThrow(message);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('文档渠道提交失败不重复创建任务', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ error: { message: '服务繁忙' } }, 503));
+      await expect(
+        createVideoTask(h3Config, { prompt: '过渡', imageReferences: refs(2) }),
+      ).rejects.toThrow('服务繁忙');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
     it('上游明确要求 JSON 时使用公网参考图重试一次', async () => {
       mockFetch.mockResolvedValueOnce(
         jsonResponse({ error: { message: 'JSON body required (public image URLs only)' } }, 400),

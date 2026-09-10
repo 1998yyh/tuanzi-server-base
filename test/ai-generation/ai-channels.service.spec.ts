@@ -63,6 +63,48 @@ describe('AiChannelsService', () => {
     jest.clearAllMocks();
   });
 
+  it('旧已知渠道响应补齐规则，不修改数据库实体', () => {
+    const existing = {
+      ...channel,
+      baseUrl: 'https://ai.939593.xyz',
+      apiKeyEncrypted: encrypt('sk-secret', TEST_KEY),
+      models: [{ name: 'minimax_h3_first_last', capability: ModelCapability.VIDEO }],
+    };
+    const view = service.toView(existing);
+    expect(view.models[0].videoConfig).toMatchObject({
+      template: 'first_last',
+      minImages: 2,
+      maxImages: 2,
+    });
+    expect(existing.models[0]).not.toHaveProperty('videoConfig');
+  });
+
+  it('创建保存自定义规则，局部更新不丢失已有规则', async () => {
+    const videoConfig = {
+      template: 'image',
+      requestFormat: 'json',
+      minImages: 1,
+      maxImages: 4,
+      fields: { images: 'images' },
+    } as const;
+    const dto = {
+      name: '自定义',
+      apiFormat: ApiFormat.OPENAI,
+      baseUrl: 'https://example.com',
+      apiKey: 'sk-secret',
+      models: [{ name: 'my-video', capability: ModelCapability.VIDEO, videoConfig }],
+    };
+    await service.create(user as never, dto);
+    expect(repo.save.mock.calls[0][0].models![0].videoConfig).toEqual(videoConfig);
+    repo.findOne.mockResolvedValue({
+      ...channel,
+      ...dto,
+      apiKeyEncrypted: encrypt('sk-secret', TEST_KEY),
+    });
+    const updated = await service.update(user as never, 'ch-1', { name: '新名称' });
+    expect(updated.models[0].videoConfig).toEqual(videoConfig);
+  });
+
   describe('create', () => {
     it('apiKey 应加密存储，响应只回脱敏值', async () => {
       const result = await service.create(user as never, {
@@ -216,6 +258,22 @@ describe('AiChannelsService', () => {
         baseUrl: 'https://api.openai.com',
         apiKey: 'sk-plain-key',
         model: 'gpt-5',
+      });
+    });
+
+    it('同名视频模型在前时仍解析对话用途记录', async () => {
+      repo.findOne.mockResolvedValue({
+        ...chatChannel,
+        models: [
+          { name: 'shared-model', capability: ModelCapability.VIDEO },
+          { name: 'shared-model', capability: ModelCapability.CHAT },
+        ],
+      });
+      await expect(
+        service.resolveChatModel('user-1', 'ch-1', 'shared-model'),
+      ).resolves.toMatchObject({
+        model: 'shared-model',
+        apiKey: 'sk-plain-key',
       });
     });
 

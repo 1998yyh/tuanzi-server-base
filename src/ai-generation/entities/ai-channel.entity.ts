@@ -7,6 +7,7 @@ import {
   ManyToOne,
   JoinColumn,
 } from 'typeorm';
+import type { VideoModelConfig } from '../video-presets';
 import { User } from '../../users/users.entity';
 
 /** 渠道 API 格式（决定请求/响应的拼装方式；「对话」用途仅支持 openai / anthropic） */
@@ -31,6 +32,7 @@ export interface ChannelModel {
   capability: ModelCapability;
   /** 自定义调用脚本：v1 服务端不支持执行，仅保留字段形状（见设计文档） */
   script?: string;
+  videoConfig?: VideoModelConfig;
 }
 
 /**

@@ -7,6 +7,7 @@
 // - 自定义调用脚本（model-plugin）与文本问答（requestImageQuestion）不在 v1 范围
 
 import { ApiFormat } from '../entities/ai-channel.entity';
+import type { VideoModelConfig } from '../video-presets';
 import {
   closestGeminiAspectRatio,
   normalizeBackground,
@@ -23,6 +24,7 @@ export interface ResolvedChannelConfig {
   apiKey: string;
   apiFormat: ApiFormat;
   model: string;
+  videoConfig?: VideoModelConfig;
 }
 
 export interface ReferenceImageInput {

@@ -21,6 +21,12 @@ import {
 import { CreateAiChannelDto } from './dto/create-ai-channel.dto';
 import { UpdateAiChannelDto } from './dto/update-ai-channel.dto';
 
+import {
+  getVideoPresets,
+  resolveVideoModelConfig,
+  validateVideoModelConfig,
+} from './video-presets';
+
 type CurrentUser = Omit<User, 'password'>;
 
 /** 对话模型解析结果（apiKey 已解密，只活在调用方栈帧） */
@@ -53,6 +59,12 @@ export class AiChannelsService {
   /** 「对话」用途的模型只允许挂在 openai / anthropic 格式的渠道上 */
   private validateModels(apiFormat: ApiFormat, models: ChannelModel[]): void {
     for (const m of models) {
+      if (m.videoConfig) {
+        if (m.capability !== ModelCapability.VIDEO || apiFormat !== ApiFormat.OPENAI) {
+          throw new BadRequestException('视频模型调用规则仅适用于 openai 格式渠道的视频用途模型');
+        }
+        validateVideoModelConfig(m.videoConfig);
+      }
       if (
         m.capability === ModelCapability.CHAT &&
         !AiChannelsService.CHAT_CAPABLE_FORMATS.has(apiFormat)
@@ -62,6 +74,10 @@ export class AiChannelsService {
         );
       }
     }
+  }
+
+  getPresets() {
+    return getVideoPresets();
   }
 
   async create(user: CurrentUser, dto: CreateAiChannelDto): Promise<AiChannelView> {
@@ -150,12 +166,14 @@ export class AiChannelsService {
     if (!channel.isActive) {
       throw new BadRequestException(`渠道 "${channel.name}" 已停用`);
     }
-    const model = channel.models.find((m) => m.name === modelName);
+    const model = channel.models.find(
+      (m) => m.name === modelName && m.capability === ModelCapability.CHAT,
+    );
     if (!model) {
+      if (channel.models.some((m) => m.name === modelName)) {
+        throw new BadRequestException(`模型 "${modelName}" 的用途不是「对话」`);
+      }
       throw new BadRequestException(`渠道 "${channel.name}" 下不存在模型 "${modelName}"`);
-    }
-    if (model.capability !== ModelCapability.CHAT) {
-      throw new BadRequestException(`模型 "${modelName}" 的用途不是「对话」`);
     }
     return {
       channelId: channel.id,
@@ -183,6 +201,13 @@ export class AiChannelsService {
     void _user;
     return {
       ...rest,
+      models: channel.models.map((model) => {
+        const config =
+          model.capability === ModelCapability.VIDEO && channel.apiFormat === ApiFormat.OPENAI
+            ? resolveVideoModelConfig(channel.baseUrl, model.name, model.videoConfig)
+            : undefined;
+        return config ? { ...structuredClone(model), videoConfig: config } : structuredClone(model);
+      }),
       apiKeyMasked: maskApiKey(decrypt(apiKeyEncrypted, this.encryptionKey)),
     };
   }

@@ -10,6 +10,7 @@ import { BadRequestException } from '@nestjs/common';
 import { assertPublicUrl } from '../../common/utils/ssrf.util';
 import { ApiFormat } from '../entities/ai-channel.entity';
 import { ResolvedChannelConfig } from './image-generation.provider';
+import { DEFAULT_VIDEO_FIELDS, resolveVideoModelConfig, VideoModelConfig } from '../video-presets';
 import { MAX_VIDEO_DOWNLOAD_BYTES, readBodyLimited } from './stream-download.util';
 import {
   boolConfig,
@@ -117,6 +118,8 @@ export async function createVideoTask(
   if (!config.apiKey.trim()) throw new Error('请配置渠道 API Key');
   const provider = resolveVideoProvider(config);
   if (provider === 'seedance') return createSeedanceTask(config, req);
+  const videoConfig = resolveVideoModelConfig(config.baseUrl, config.model, config.videoConfig);
+  if (videoConfig) return createConfiguredVideoTask(config, req, videoConfig);
   if (req.videoReferenceUrls?.length || req.audioReferenceUrls?.length) {
     throw new Error('当前渠道仅支持图片参考素材');
   }
@@ -183,6 +186,148 @@ function buildVideoApiUrl(baseUrl: string, path: string): string {
     normalized = `${normalized}/v1`;
   }
   return `${normalized}${path}`;
+}
+
+async function publicVideoReferenceUrl(raw: string | undefined): Promise<string> {
+  try {
+    if (!raw) throw new Error('缺少素材地址');
+    const url = await assertPublicUrl(raw);
+    if (url.username || url.password) throw new Error('地址包含凭据');
+    return url.toString();
+  } catch {
+    throw new BadRequestException(
+      '当前视频渠道需要公网参考素材地址，请检查 PUBLIC_BASE_URL 和媒体访问地址',
+    );
+  }
+}
+
+async function createConfiguredVideoTask(
+  config: ResolvedChannelConfig,
+  req: GenerateVideoRequest,
+  rules: VideoModelConfig,
+): Promise<VideoTaskRef> {
+  const model = config.model.trim();
+  const images = req.imageReferences ?? [];
+  const audios = req.audioReferenceUrls ?? [];
+  const isFirstLast = rules.template === 'first_last';
+  const isLipsync = rules.template === 'lipsync';
+  const fields = {
+    ...DEFAULT_VIDEO_FIELDS,
+    ...rules.fields,
+  };
+  if (req.videoReferenceUrls?.length) throw new BadRequestException('当前模型不支持参考视频');
+  if (isFirstLast && images.length !== 2) {
+    throw new BadRequestException(
+      '首尾帧模型需要恰好 2 张图片，依次为首帧和尾帧；单图请选择普通图生视频模型',
+    );
+  }
+  const maxImages = rules.maxImages ?? (rules.template === 'text' ? 0 : isFirstLast ? 2 : 9);
+  const minImages = rules.minImages ?? (rules.template === 'text' ? 0 : isFirstLast ? 2 : 1);
+  if (rules.template === 'text' && images.length)
+    throw new BadRequestException('文生视频模型不支持参考图片，请选择图生视频模型');
+  if (images.length > maxImages) throw new BadRequestException(`参考图片最多 ${maxImages} 张`);
+  if (images.length < minImages)
+    throw new BadRequestException(`当前模型需要参考图片，至少 ${minImages} 张`);
+  if (isLipsync ? audios.length !== 1 : audios.length > 0) {
+    throw new BadRequestException(
+      isLipsync ? '对口型模型需要恰好 1 段参考音频' : '当前模型不支持参考音频',
+    );
+  }
+
+  const payload: Record<string, unknown> = { model, prompt: req.prompt };
+  {
+    const maxSeconds = rules.maxSeconds ?? rules.fixedSeconds ?? 15;
+    const seconds =
+      rules.fixedSeconds ??
+      (req.seconds === undefined ? Math.min(5, maxSeconds) : Number(req.seconds));
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > maxSeconds) {
+      throw new BadRequestException(`当前模型时长必须为 1-${maxSeconds} 秒的整数`);
+    }
+    payload[fields.seconds] = seconds;
+    if (rules.fixedResolution) {
+      payload[fields.resolution] = rules.fixedResolution;
+    } else if (rules.resolutions?.length) {
+      const resolution = req.vquality || rules.resolutions[0];
+      const matched =
+        rules.resolutions.find((value) => value.toLowerCase() === resolution.toLowerCase()) ??
+        rules.resolutions.find(
+          (value) => value.toLowerCase() === normalizeResolutionToken(resolution).toLowerCase(),
+        );
+      if (!matched)
+        throw new BadRequestException(`当前模型仅支持 ${rules.resolutions.join(' 或 ')} 清晰度`);
+      payload[fields.resolution] = matched;
+    } else if (rules.resolutions === undefined && req.vquality) {
+      payload[fields.resolution] = normalizeResolutionToken(req.vquality);
+    }
+  }
+  if (req.size && req.size !== 'auto') {
+    let ratio = req.size;
+    const dimensions = ratio.match(/^(\d+)x(\d+)$/);
+    if (dimensions) {
+      const width = Number(dimensions[1]);
+      const height = Number(dimensions[2]);
+      ratio = width > height ? '16:9' : width < height ? '9:16' : '1:1';
+    }
+    if (!['16:9', '9:16', '1:1'].includes(ratio))
+      throw new BadRequestException('当前模型仅支持 16:9、9:16 或 1:1 比例');
+    payload[fields.aspectRatio] = ratio;
+  }
+  const urls =
+    rules.requestFormat === 'json'
+      ? await Promise.all(images.map((image) => publicVideoReferenceUrl(image.url)))
+      : [];
+  if (isFirstLast) {
+    if (urls.length) {
+      payload[fields.firstFrame] = urls[0];
+      payload[fields.lastFrame] = urls[1];
+    }
+  } else if (urls.length) {
+    payload[fields.images] = urls;
+  }
+  if (isLipsync) payload[fields.audio] = await publicVideoReferenceUrl(audios[0]);
+
+  let body: string | FormData = JSON.stringify(payload);
+  const headers: Record<string, string> = { Authorization: `Bearer ${config.apiKey}` };
+  if (rules.requestFormat === 'multipart') {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(payload)) form.append(key, String(value));
+    images.forEach((image, index) => {
+      const field = isFirstLast
+        ? index === 0
+          ? fields.firstFrame
+          : fields.lastFrame
+        : fields.images;
+      const bytes = Buffer.from(image.dataUrl.split(',')[1] || '', 'base64');
+      form.append(
+        field,
+        new Blob([new Uint8Array(bytes)], { type: image.mimeType }),
+        image.fileName,
+      );
+    });
+    body = form;
+  } else headers['Content-Type'] = 'application/json';
+
+  try {
+    const endpoint = await assertPublicUrl(buildVideoApiUrl(config.baseUrl, '/videos'));
+    const response = await fetch(endpoint.toString(), {
+      method: 'POST',
+      headers,
+      body,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(CREATE_TIMEOUT_MS),
+    });
+    if (response.status >= 300 && response.status < 400)
+      throw new Error('视频任务创建失败（响应重定向，已拒绝）');
+    if (!response.ok) throw new Error(await readFetchError(response, '视频任务创建失败'));
+    const created = unwrapEnvelope(
+      (await response.json()) as ApiVideoResponse,
+      '接口未返回视频任务',
+    );
+    if (!created.id) throw new Error('接口未返回视频任务 ID');
+    return { provider: 'openai', remoteTaskId: created.id };
+  } catch (error) {
+    throw toChineseError(error, '视频任务创建失败');
+  }
 }
 
 async function createOpenAiVideoTask(

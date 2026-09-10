@@ -105,6 +105,22 @@ describe('GenerationService', () => {
   });
 
   describe('resolveChannelModel', () => {
+    it('同名不同用途选择视频配置并传给生成器', async () => {
+      const videoConfig = { template: 'first_last', requestFormat: 'json', maxImages: 2 };
+      aiChannelsService.findWithKey.mockResolvedValue({
+        channel: {
+          ...channel,
+          models: [
+            { name: 'multi', capability: ModelCapability.IMAGE },
+            { name: 'multi', capability: ModelCapability.VIDEO, videoConfig },
+          ],
+        },
+        apiKey: 'k',
+      });
+      await expect(
+        service.resolveChannelModel('user-1', 'ch-1::multi', ModelCapability.VIDEO),
+      ).resolves.toMatchObject({ model: 'multi', videoConfig });
+    });
     it('格式非法时报错', async () => {
       await expect(
         service.resolveChannelModel('user-1', 'bad-ref', ModelCapability.IMAGE),
@@ -165,6 +181,14 @@ describe('GenerationService', () => {
     });
     mediaService.findByIdsForUser.mockResolvedValue([
       {
+        id: 'm2',
+        kind: MediaKind.IMAGE,
+        mimeType: 'image/png',
+        fileName: 'b.png',
+        bytes: 10,
+        url: '/uploads/media/b.png',
+      },
+      {
         id: 'm1',
         kind: MediaKind.IMAGE,
         mimeType: 'image/png',
@@ -182,9 +206,9 @@ describe('GenerationService', () => {
       await service.generateVideo(user as never, {
         modelRef: 'ch-1::sora-2',
         prompt: '猫',
-        referenceMediaIds: ['m1'],
+        referenceMediaIds: ['m1', 'm2'],
       });
-      expect(mediaService.findByIdsForUser).toHaveBeenCalledWith(['m1'], user.id);
+      expect(mediaService.findByIdsForUser).toHaveBeenCalledWith(['m1', 'm2'], user.id);
       const base = (
         process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3000}`
       ).replace(/\/+$/, '');

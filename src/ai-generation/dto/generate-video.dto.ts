@@ -74,11 +74,12 @@ export class GenerateVideoDto {
   @ApiProperty({
     required: false,
     type: [String],
-    description: '参考素材媒体 ID（图片≤9 / 视频≤3 / 音频≤3，仅 Seedance 支持音视频参考）',
+    description:
+      '参考素材媒体 ID，按传入顺序使用；首尾帧模型需 2 张图（首帧、尾帧）；Seedance 支持音视频，H3 对口型支持 1 段音频，Vela 支持 10 张图',
   })
   @IsArray()
   @IsUUID('4', { each: true })
-  @ArrayMaxSize(15)
+  @ArrayMaxSize(21)
   @IsOptional()
   referenceMediaIds?: string[];
 
