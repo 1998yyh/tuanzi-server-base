@@ -13,6 +13,7 @@ import { CanvasOpsService } from 'src/canvas/canvas-ops.service';
 import { ApiFormat, ModelCapability } from 'src/ai-generation/entities/ai-channel.entity';
 import { MediaKind, MediaSource } from 'src/media/media-file.entity';
 import { generateImages } from 'src/ai-generation/providers/image-generation.provider';
+import * as videoProvider from 'src/ai-generation/providers/video-generation.provider';
 
 jest.mock('src/ai-generation/providers/image-generation.provider', () => ({
   generateImages: jest.fn(),
@@ -155,6 +156,45 @@ describe('GenerationService', () => {
         model: 'gpt-image-2',
       });
     });
+  });
+
+  it('视频参考图在校验归属后附带现有媒体绝对地址', async () => {
+    aiChannelsService.findWithKey.mockResolvedValue({
+      channel: { ...channel, models: [{ name: 'sora-2', capability: ModelCapability.VIDEO }] },
+      apiKey: 'k',
+    });
+    mediaService.findByIdsForUser.mockResolvedValue([
+      {
+        id: 'm1',
+        kind: MediaKind.IMAGE,
+        mimeType: 'image/png',
+        fileName: 'a.png',
+        bytes: 10,
+        url: '/uploads/media/a.png',
+      },
+    ]);
+    taskRepo.findOne.mockResolvedValue(task);
+    const create = jest.spyOn(videoProvider, 'createVideoTask').mockResolvedValue({
+      provider: 'openai',
+      remoteTaskId: 'video-1',
+    });
+    try {
+      await service.generateVideo(user as never, {
+        modelRef: 'ch-1::sora-2',
+        prompt: '猫',
+        referenceMediaIds: ['m1'],
+      });
+      expect(mediaService.findByIdsForUser).toHaveBeenCalledWith(['m1'], user.id);
+      const base = (
+        process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3000}`
+      ).replace(/\/+$/, '');
+      expect(create.mock.calls[0][1].imageReferences?.[0]).toMatchObject({
+        url: `${base}/uploads/media/a.png`,
+        dataUrl: expect.stringContaining('data:image/png;base64,'),
+      });
+    } finally {
+      create.mockRestore();
+    }
   });
 
   describe('generateImage', () => {

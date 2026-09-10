@@ -52,7 +52,7 @@ type CurrentUser = Omit<User, 'password'>;
 const MODEL_REF_SEPARATOR = '::';
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 
-/** 参考音视频素材的绝对 URL 前缀（远端模型服务需要可公网拉取的地址） */
+/** 参考素材的绝对 URL 前缀（远端模型服务需要可公网拉取的地址） */
 const PUBLIC_BASE_URL = (
   process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 3000}`
 ).replace(/\/+$/, '');
@@ -362,7 +362,7 @@ export class GenerationService {
     return this.downloadToBuffer(url, maxBytes, defaultMime, '下载生成结果');
   }
 
-  /** 视频参考素材：图片转 dataUrl，音视频转绝对 URL（Seedance 校验尺寸/数量） */
+  /** 视频参考素材：图片提供 dataUrl 和绝对 URL，音视频提供绝对 URL */
   private async prepareVideoReferences(
     mediaIds: string[],
     userId: string,
@@ -391,6 +391,7 @@ export class GenerationService {
         const buffer = await readFile(this.mediaService.diskPath(media));
         imageReferences.push({
           dataUrl: `data:${media.mimeType};base64,${buffer.toString('base64')}`,
+          url: `${PUBLIC_BASE_URL}${media.url}`,
           mimeType: media.mimeType,
           fileName: media.fileName,
         });

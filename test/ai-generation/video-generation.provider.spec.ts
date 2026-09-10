@@ -71,6 +71,91 @@ describe('video-generation.provider', () => {
   });
 
   describe('createVideoTask（openai 兼容）', () => {
+    it('上游明确要求 JSON 时使用公网参考图重试一次', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ error: { message: 'JSON body required (public image URLs only)' } }, 400),
+      );
+      mockFetch.mockResolvedValueOnce(jsonResponse({ id: 'json-video' }));
+      const image = {
+        dataUrl: 'data:image/png;base64,AAAA',
+        url: 'https://8.8.8.8/uploads/media/a.png',
+        mimeType: 'image/png',
+        fileName: 'a.png',
+      };
+      await expect(
+        createVideoTask(openaiConfig, {
+          prompt: '动起来',
+          seconds: '8',
+          size: '9:16',
+          imageReferences: [image],
+        }),
+      ).resolves.toEqual({ provider: 'openai', remoteTaskId: 'json-video' });
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      const [url, init] = mockFetch.mock.calls[1];
+      expect(url).toBe('https://api.example.com/v1/videos');
+      expect(init.headers['Content-Type']).toBe('application/json');
+      expect(JSON.parse(init.body)).toMatchObject({
+        model: 'sora-2',
+        prompt: '动起来',
+        seconds: '8',
+        size: '720x1280',
+        input_reference: [image.url],
+      });
+      expect(init.body).not.toContain('base64');
+    });
+
+    it('纯文本请求也能在明确拒绝表单后改用 JSON', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ message: 'JSON body required (public image URLs only)' }, 400),
+      );
+      mockFetch.mockResolvedValueOnce(jsonResponse({ id: 'text-video' }));
+      await expect(createVideoTask(openaiConfig, { prompt: '猫', size: 'auto' })).resolves.toEqual({
+        provider: 'openai',
+        remoteTaskId: 'text-video',
+      });
+      const payload = JSON.parse(mockFetch.mock.calls[1][1].body);
+      expect(payload).not.toHaveProperty('input_reference');
+      expect(payload).not.toHaveProperty('size');
+    });
+
+    it.each([undefined, 'http://127.0.0.1/a.png', 'data:image/png;base64,AAAA'])(
+      'JSON 重试拒绝缺失或非公网图片地址：%s',
+      async (url) => {
+        mockFetch.mockResolvedValue(
+          jsonResponse({ message: 'JSON body required (public image URLs only)' }, 400),
+        );
+        await expect(
+          createVideoTask(openaiConfig, {
+            prompt: '猫',
+            imageReferences: [
+              {
+                dataUrl: 'data:image/png;base64,AAAA',
+                mimeType: 'image/png',
+                fileName: 'a.png',
+                url,
+              },
+            ] as any,
+          }),
+        ).rejects.toThrow('公网');
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('JSON 仍失败时不继续重试，透出第二次错误', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({ message: 'JSON body required (public image URLs only)' }, 400),
+      );
+      mockFetch.mockResolvedValueOnce(jsonResponse({ message: '模型不支持' }, 400));
+      await expect(createVideoTask(openaiConfig, { prompt: '猫' })).rejects.toThrow('模型不支持');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('普通 400 不触发格式重试', async () => {
+      mockFetch.mockResolvedValue(jsonResponse({ message: '参数错误' }, 400));
+      await expect(createVideoTask(openaiConfig, { prompt: '猫' })).rejects.toThrow('参数错误');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
     it('multipart 提交并返回远端任务 ID，baseUrl 自动补 /v1', async () => {
       mockFetch.mockResolvedValue(jsonResponse({ id: 'video-123', status: 'queued' }));
       const ref = await createVideoTask(openaiConfig, { prompt: '一只猫', seconds: '6' });

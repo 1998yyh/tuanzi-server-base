@@ -37,6 +37,8 @@ export interface VideoTaskRef {
 
 export interface VideoImageReference {
   dataUrl: string;
+  /** 现有媒体的公网绝对地址，供仅接受 JSON URL 的兼容渠道使用 */
+  url?: string;
   mimeType: string;
   fileName: string;
 }
@@ -209,12 +211,49 @@ async function createOpenAiVideoTask(
   });
 
   try {
-    const response = await fetch(buildVideoApiUrl(config.baseUrl, '/videos'), {
+    let response = await fetch(buildVideoApiUrl(config.baseUrl, '/videos'), {
       method: 'POST',
       headers: { Authorization: `Bearer ${config.apiKey}` },
       body,
       signal: AbortSignal.timeout(CREATE_TIMEOUT_MS),
     });
+    if (!response.ok) {
+      const message = await readFetchError(response, '视频任务创建失败');
+      // 只在上游明确拒绝表单时重试；超时、限流等不能保证任务未创建，不重试。
+      if (
+        response.status !== 400 ||
+        !/JSON body required \(public image URLs only\)/i.test(message)
+      ) {
+        throw new Error(message);
+      }
+      const imageUrls: string[] = [];
+      for (const image of images) {
+        try {
+          if (!image.url) throw new Error('缺少图片地址');
+          const url = await assertPublicUrl(image.url);
+          if (url.username || url.password) throw new Error('图片地址包含凭据');
+          imageUrls.push(url.toString());
+        } catch {
+          throw new Error(
+            '当前视频渠道需要公网参考图片地址，请检查 PUBLIC_BASE_URL 和媒体访问地址',
+          );
+        }
+      }
+      response = await fetch(buildVideoApiUrl(config.baseUrl, '/videos'), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: config.model.trim(),
+          prompt: req.prompt,
+          seconds: normalizeVideoSeconds(req.seconds),
+          ...(size ? { size } : {}),
+          resolution_name: normalizeResolutionToken(req.vquality || ''),
+          preset: 'normal',
+          ...(imageUrls.length ? { input_reference: imageUrls } : {}),
+        }),
+        signal: AbortSignal.timeout(CREATE_TIMEOUT_MS),
+      });
+    }
     if (!response.ok) throw new Error(await readFetchError(response, '视频任务创建失败'));
     const created = unwrapEnvelope(
       (await response.json()) as ApiVideoResponse,
