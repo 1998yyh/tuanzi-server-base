@@ -1,5 +1,4 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
 import { StructuredToolInterface } from '@langchain/core/tools';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -38,10 +37,8 @@ export class ToolRegistryService implements OnModuleInit, OnModuleDestroy {
   /** 单飞：同 cacheKey 的 connect 进行中缓存（Promise），成功后转入 mcpClients */
   private readonly pendingConnections = new Map<string, Promise<Client>>();
 
-  constructor(private readonly config: ConfigService) {}
-
   onModuleInit() {
-    this.builtinTools.set('web_search', new WebSearchTool(this.config));
+    this.builtinTools.set('web_search', new WebSearchTool());
     this.builtinTools.set('calculator', new CalculatorTool());
     // 后续新增内置工具在此注册
   }

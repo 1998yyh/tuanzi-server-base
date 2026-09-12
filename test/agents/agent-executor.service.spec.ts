@@ -13,6 +13,7 @@ import { AgentConfig } from 'src/agents/entities/agent-config.entity';
 import { MessageRole } from 'src/agents/entities/message.entity';
 import { AiChannelsService } from 'src/ai-generation/ai-channels.service';
 import { ApiFormat } from 'src/ai-generation/entities/ai-channel.entity';
+import { DelegateToolFactory } from 'src/agents/tools/delegate-tool.factory';
 
 // 这个 mock 必须在 import 之前声明，jest.mock 会被提升到顶部
 const mockInvoke = jest.fn();
@@ -71,6 +72,7 @@ describe('AgentExecutorService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AgentExecutorService,
+        { provide: DelegateToolFactory, useValue: {} },
         { provide: ToolRegistryService, useValue: toolRegistry },
         { provide: McpServersService, useValue: mcpServersService },
         { provide: SkillToolFactory, useValue: skillToolFactory },
@@ -112,6 +114,7 @@ describe('AgentExecutorService', () => {
         {
           role: MessageRole.ASSISTANT,
           content: '你好，我是助手',
+          reasoning: null,
           toolCalls: null,
           totalTokens: null,
         },
@@ -323,7 +326,13 @@ describe('AgentExecutorService', () => {
 
       // 只包含本轮新增的 assistant 消息，不含历史
       expect(second).toEqual([
-        { role: MessageRole.ASSISTANT, content: '第二轮回答', toolCalls: null, totalTokens: null },
+        {
+          role: MessageRole.ASSISTANT,
+          content: '第二轮回答',
+          reasoning: null,
+          toolCalls: null,
+          totalTokens: null,
+        },
       ]);
     });
 
@@ -417,7 +426,13 @@ describe('AgentExecutorService', () => {
 
       expect(toolRegistry.getToolsForAgent).toHaveBeenCalled();
       expect(result).toEqual([
-        { role: MessageRole.ASSISTANT, content: '批量回答', toolCalls: null, totalTokens: null },
+        {
+          role: MessageRole.ASSISTANT,
+          content: '批量回答',
+          reasoning: null,
+          toolCalls: null,
+          totalTokens: null,
+        },
       ]);
     });
 
@@ -430,6 +445,7 @@ describe('AgentExecutorService', () => {
         {
           role: MessageRole.ASSISTANT,
           content: '子 Agent 输出',
+          reasoning: null,
           toolCalls: null,
           totalTokens: null,
         },

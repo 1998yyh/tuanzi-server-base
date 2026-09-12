@@ -13,7 +13,7 @@ import { StructuredToolInterface } from '@langchain/core/tools';
 import { RunnableConfig } from '@langchain/core/runnables';
 import { StreamEvent } from '@langchain/core/tracers/log_stream';
 import { ChatAnthropic } from '@langchain/anthropic';
-import { ChatOpenAI } from '@langchain/openai';
+import { ChatOpenAI, ChatOpenAICompletions } from '@langchain/openai';
 import { AgentConfig } from './entities/agent-config.entity';
 import { MessageRole } from './entities/message.entity';
 import { ToolRegistryService } from './tools/tool-registry.service';
@@ -25,6 +25,8 @@ import { TypeORMCheckpointer } from './checkpointers/typeorm.checkpointer';
 import { AiChannelsService, ResolvedChatModel } from '../ai-generation/ai-channels.service';
 import { ApiFormat } from '../ai-generation/entities/ai-channel.entity';
 import { NewMessageData, SseEvent } from './agents.types';
+import { kimiWebSearchFetch, prepareNativeWebSearch } from './tools/native-web-search';
+import { extractAnswerText } from './utils/answer-text';
 
 /** 单个工具最长执行时间，超时视为失败让 LLM 决策 */
 const TOOL_TIMEOUT_MS = 30_000;
@@ -405,11 +407,11 @@ export class AgentExecutorService {
     useCheckpointer = true,
     erroredToolCalls: Set<string> = new Set(),
   ) {
-    const model = await this.createModelFromConfig(config);
-    if (tools.length && !model.bindTools) {
+    const { model, modelTools, executionTools } = await this.createModelFromConfig(config, tools);
+    if (modelTools.length && !model.bindTools) {
       throw new BadRequestException(`模型 ${config.modelName} 不支持工具调用，请关闭工具配置`);
     }
-    const modelWithTools = tools.length ? model.bindTools!(tools) : model;
+    const modelWithTools = modelTools.length ? model.bindTools!(modelTools) : model;
     // 系统级时间戳元数据（Kimi 风格）：graph 每次调用都重建，时间戳随每轮用户消息刷新；
     // 与用户 systemPrompt 拼接后前插到模型输入，不写入 checkpoint
     const timeMeta = `timestamp="${this.formatTimestamp()}"`;
@@ -431,7 +433,7 @@ export class AgentExecutorService {
         const threadId = config?.configurable?.thread_id as string | undefined;
         const results = await Promise.all(
           (lastMsg.tool_calls ?? []).map(async (call) => {
-            const tool = tools.find((t) => t.name === call.name);
+            const tool = executionTools.find((t) => t.name === call.name);
             let isError = false;
             let output: unknown;
             if (tool) {
@@ -460,6 +462,13 @@ export class AgentExecutorService {
       .addEdge(START, AGENT_NODE)
       .addConditionalEdges(AGENT_NODE, (state: AgentState) => {
         const last = state.messages.at(-1) as AIMessage;
+        // Anthropic 服务端工具可能暂停当前回合，继续请求时必须携带原始内容块。
+        if (last.response_metadata?.stop_reason === 'pause_turn') {
+          if (state.iterations >= state.maxIterations) {
+            throw new BadRequestException('内置联网搜索尚未完成，已达到 Agent 迭代上限');
+          }
+          return AGENT_NODE;
+        }
         if (last.tool_calls?.length && state.iterations < state.maxIterations) {
           return TOOLS_NODE;
         }
@@ -556,30 +565,44 @@ export class AgentExecutorService {
   }
 
   /** 按 Agent 引用的渠道创建 ChatModel；解密结果只活在函数栈帧 */
-  private async createModelFromConfig(config: AgentConfig): Promise<BaseChatModel> {
+  private async createModelFromConfig(config: AgentConfig, tools: StructuredToolInterface[]) {
     const resolved: ResolvedChatModel = await this.aiChannelsService.resolveChatModel(
       config.userId,
       config.channelId,
       config.modelName,
     );
+    const search = prepareNativeWebSearch(resolved, tools);
+    let model: BaseChatModel;
     switch (resolved.apiFormat) {
       case ApiFormat.ANTHROPIC:
-        return new ChatAnthropic({
+        model = new ChatAnthropic({
           apiKey: resolved.apiKey,
           model: resolved.model,
           maxTokens: config.maxTokens,
           anthropicApiUrl: resolved.baseUrl,
         });
+        break;
       case ApiFormat.OPENAI:
-        return new ChatOpenAI({
-          apiKey: resolved.apiKey,
-          model: resolved.model,
-          maxTokens: config.maxTokens,
-          configuration: { baseURL: resolved.baseUrl },
-        });
+        model =
+          search.kind === 'kimi'
+            ? new ChatOpenAICompletions({
+                apiKey: resolved.apiKey,
+                model: resolved.model,
+                maxTokens: config.maxTokens,
+                configuration: { baseURL: resolved.baseUrl, fetch: kimiWebSearchFetch },
+              })
+            : new ChatOpenAI({
+                apiKey: resolved.apiKey,
+                model: resolved.model,
+                maxTokens: config.maxTokens,
+                configuration: { baseURL: resolved.baseUrl },
+                ...(search.kind === 'openai' ? { useResponsesApi: true } : {}),
+              });
+        break;
       default:
         throw new BadRequestException(`渠道格式 "${resolved.apiFormat}" 不支持对话`);
     }
+    return { model, ...search };
   }
 
   /** LangChain BaseMessage → Message 表持久化数据 */
@@ -604,7 +627,7 @@ export class AgentExecutorService {
       const reasoning = this.extractThinking(message.content);
       return {
         role: MessageRole.ASSISTANT,
-        content: this.extractText(message.content),
+        content: extractAnswerText(message.content),
         reasoning: reasoning || null,
         toolCalls: toolCalls?.length ? toolCalls : null,
         totalTokens: usage ? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) : null,
@@ -657,7 +680,7 @@ export class AgentExecutorService {
         return {
           type: 'message_end',
           data: {
-            content: output ? this.extractText(output.content) : '',
+            content: output ? extractAnswerText(output.content) : '',
             reasoning: reasoning || null,
             toolCalls: toolCalls?.length ? toolCalls : null,
             totalTokens,
