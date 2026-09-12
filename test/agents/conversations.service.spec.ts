@@ -9,6 +9,7 @@ import { Message, MessageRole } from 'src/agents/entities/message.entity';
 import { AgentExecutorService } from 'src/agents/agent-executor.service';
 import { TypeORMCheckpointer } from 'src/agents/checkpointers/typeorm.checkpointer';
 import { SseEvent } from 'src/agents/agents.types';
+import { ConversationExecutionLock } from 'src/agents/utils/conversation-execution-lock';
 
 describe('ConversationsService', () => {
   let service: ConversationsService;
@@ -49,6 +50,7 @@ describe('ConversationsService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ConversationsService,
+        ConversationExecutionLock,
         {
           provide: getRepositoryToken(AgentConfig),
           useValue: { findOne: jest.fn() },

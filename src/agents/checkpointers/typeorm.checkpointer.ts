@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { MoreThan, Repository } from 'typeorm';
+import { EntityManager, MoreThan, Repository } from 'typeorm';
 import { RunnableConfig } from '@langchain/core/runnables';
 import {
   BaseCheckpointSaver,
@@ -259,9 +259,11 @@ export class TypeORMCheckpointer extends BaseCheckpointSaver {
   }
 
   /** 会话删除时调用：清理该 thread 的全部快照与写入 */
-  async deleteThread(threadId: string): Promise<void> {
-    await this.checkpointRepo.delete({ threadId });
-    await this.writesRepo.delete({ threadId });
+  async deleteThread(threadId: string, manager?: EntityManager): Promise<void> {
+    const checkpoints = manager?.getRepository(AgentCheckpoint) ?? this.checkpointRepo;
+    const writes = manager?.getRepository(AgentCheckpointWrite) ?? this.writesRepo;
+    await checkpoints.delete({ threadId });
+    await writes.delete({ threadId });
   }
 
   /**

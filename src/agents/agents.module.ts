@@ -51,6 +51,7 @@ import { AssetsModule } from '../assets/assets.module';
     PromptsModule,
     AssetsModule,
   ],
+  exports: [ConversationsService, ConversationExecutionLock, TypeORMCheckpointer],
   controllers: [AgentsController, ConversationsController, BackgroundTasksController],
   providers: [
     AgentsService,
