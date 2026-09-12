@@ -1,0 +1,21 @@
+CREATE TABLE stock_screening_runs (
+  id varchar(36) NOT NULL,
+  user_id varchar(36) NOT NULL,
+  strategy_id varchar(36) NOT NULL,
+  strategy_snapshot json NOT NULL,
+  status enum('queued','running','done','failed') NOT NULL DEFAULT 'queued',
+  as_of datetime NOT NULL,
+  target_snapshot json NOT NULL,
+  sampled_at datetime NULL,
+  total int NOT NULL DEFAULT 0,
+  checked int NOT NULL DEFAULT 0,
+  matched int NOT NULL DEFAULT 0,
+  items json NULL,
+  data_gaps json NULL,
+  catalog_coverage varchar(120) NULL,
+  error_message varchar(255) NULL,
+  created_at datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  KEY IDX_stock_screening_runs_user_created (user_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -22,6 +22,11 @@ src/
   mcp-servers/    # 全局 MCP Server 工具库：Admin 集中配置，用户选配给 Agent；
                   #   env/headers AES-256-GCM 加密落库，绝不明文出现在 API 响应
   skills/         # 技能 CRUD + skill-tool.factory：Skill → DynamicStructuredTool
+  stock-strategies/ # 观澜固定模板/用户组合策略：JWT、参数校验、版本快照与逻辑删除
+  stock-market/   # 观澜行情适配与指标计算，来源和缺失显式返回
+  stock-screening/ # 单实例筛选队列，ResearchWatch目标/策略/结果快照
+  stock-research/ # 独立观察池、AI复盘上下文，复用Agent会话/SSE/凭据
+  stock-alerts/   # 每分钟监控、事务锁去重、持久事件；不等于设备已收到
   stock-signals/  # A股多空信号：新浪 upbs（并发 12 / 超时 10s），POST 异步扫描，GET 公开只读
   media/          # 媒体上传/落盘（saveBuffer 是生成结果主写入路径）+ /uploads/media
   ai-generation/  # AI 渠道 CRUD + resolveChatModel + 图/视/音生成 + cron 视频轮询
@@ -32,7 +37,7 @@ src/
   common/         # guards / decorators / filters / crypto.util / ssrf.util
 ```
 
-- 功能模块在 `src/app.module.ts` 注册。当前：`AuthModule`、`UsersModule`、`DailyReportsModule`、`AgentsModule`、`McpServersModule`、`SkillsModule`、`StockSignalsModule`、`MediaModule`、`AiGenerationModule`、`CanvasModule`、`PromptsModule`、`AssetsModule`。新增模块必须手动加进 `imports`。
+- 功能模块在 `src/app.module.ts` 注册。当前：`AuthModule`、`UsersModule`、`DailyReportsModule`、`AgentsModule`、`McpServersModule`、`SkillsModule`、`StockSignalsModule`、`MediaModule`、`AiGenerationModule`、`CanvasModule`、`PromptsModule`、`AssetsModule`、`StockStrategiesModule`、`StockMarketModule`、`StockScreeningModule`、`StockResearchModule`、`StockAlertsModule`。新增模块必须手动加进 `imports`。
 - **模块依赖方向（无环）**：`CanvasModule ← AiGenerationModule ← AgentsModule`。`AiGenerationModule` 用 `TypeOrmModule.forFeature([AgentConfig])` 做渠道删除引用检查，**不** import `AgentsModule`。新增依赖必须保持无环。
 - **画布平台**（2026-08 从 infinite-canvas 迁移，AGPL-3.0，见根目录 NOTICE 与 `docs/plans/2026-08-07-canvas-platform-design.md`）：画布文档 = `canvas_projects.document` JSON 列 + `version` 乐观锁。所有写路径（前端整文档保存 / Agent ops / 生成回填）走 `CanvasDocumentService.applyMutation`；`CanvasOpsService` 是上层 ops 入口。视频生成任务化（POST 立即返回 taskId，`GenerationPollerService` cron 10s 轮询回填）。**自定义调用脚本 v1 不支持**（服务端 `new Function` = RCE，决策见设计文档 §1；`ChannelModel.script` 只保留字段形状）。
 - `uploads/` 目录（仓库根）存封面图与媒体；`main.ts` 静态服务在 `/uploads/` 前缀（在 `/api` 之外，前端拼 URL 要补 origin）。静态响应带 `X-Content-Type-Options: nosniff` 与 CSP sandbox（防存储型 XSS）。媒体落盘目录是 `uploads/media`（`MediaService.MEDIA_DIR`）。
@@ -194,10 +199,16 @@ Agent **不再内嵌** provider / apiKey / baseUrl / model。运行时链路：
 - 不要改已经进入 `ddl_history` 的 SQL 文件名。
 - 不要给用户可控 URL 的服务端 `fetch` 跳过 SSRF 校验，也不要 `redirect: follow` 绕过（生成下载是 `redirect: manual`）。
 
+## 策略库
+
+- 修改策略定义、版本或删除行为前，阅读 `docs/plans/2026-09-12-stock-strategies-impl.md`。`StockStrategiesService` 使用带 userId/version/deletedAt 的条件 UPDATE 防止覆盖；固定模板不落库、不提供写接口。
+- 观澜观察池使用 `ResearchWatch`，不是原 B/S 信号的 `StockWatchlist`。研究上下文与同用户会话事务保存；筛选 AI 只接受本任务有效候选，最多30只。参阅 `docs/plans/2026-09-12-stock-research-impl.md`。
+- 当前筛选任务、会话锁和行情缓存仅支持单应用实例，不能部署多副本。`deliveryStatus=queued` 不能解释为推送成功。运行边界见 `docs/plans/2026-09-12-guanlan-runbook.md`。
+
 ## 测试要求
 
 - Jest 30 + ts-jest 29，测试放 `test/`、镜像 `src/` 模块结构，`roots` 限定 `test/`。
-- 单元测试 mock 所有外部依赖（Repository、被注入的其他 Service），不连真实数据库；目前无 e2e。
+- 单元测试 mock 外部依赖，不连真实数据库；策略 HTTP 单测使用替代身份守卫与 mock Repository。独立 `scripts/guanlan-smoke.cjs` 使用真实 Nest/JWT/MySQL，只接受 `guanlan_test*` 测试库，行情与模型为测试替身。测试建库脚本只接受空的 `guanlan_test_*`，不可用于生产。
 - 覆盖率收集排除 `*.module.ts` / `*.dto.ts` / `*.entity.ts` / `main.ts`——业务逻辑放 Service 层才进覆盖率。
 - 测试里 `@typescript-eslint/no-explicit-any` 关闭；生产代码是 `warn`。
 

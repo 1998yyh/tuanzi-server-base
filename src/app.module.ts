@@ -1,4 +1,9 @@
 import { Module } from '@nestjs/common';
+import { StockMarketModule } from './stock-market/stock-market.module';
+import { StockScreeningModule } from './stock-screening/stock-screening.module';
+import { StockAlertsModule } from './stock-alerts/stock-alerts.module';
+import { StockResearchModule } from './stock-research/stock-research.module';
+import { StockStrategiesModule } from './stock-strategies/stock-strategies.module';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from './auth/auth.module';
@@ -46,6 +51,11 @@ import { AssetsModule } from './assets/assets.module';
     McpServersModule,
     SkillsModule,
     StockSignalsModule,
+    StockStrategiesModule,
+    StockResearchModule,
+    StockMarketModule,
+    StockScreeningModule,
+    StockAlertsModule,
     MediaModule,
     AiGenerationModule,
     CanvasModule,
